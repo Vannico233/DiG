@@ -1,6 +1,6 @@
 # CPU 联网准备，GPU 离线运行（共享目录）
 
-适用于当前服务器：CPU 区是 Linux x86_64 / Python 3.9.19；GPU 区有两张 H200，不能联网；两区能看到同一个持久目录。
+适用于当前服务器：CPU 区是 Linux x86_64 / Python 3.9.19；GPU 区已改为四张 H100 80GB，base Python 3.13.5，不能联网；两区能看到同一个持久目录。项目仍使用独立 Python 3.11，下载版本无需随 base Python 改变。本流程也适用于之前的两张 H200。
 
 做法是在共享仓库中安装一整套 Python 3.11 环境。CPU 区负责安装、下载和整理数据，GPU 区直接使用已经安装好的环境。系统的 `/etc/inspire` 和 Python 3.9 保持原样；此流程不需要 sudo。
 
@@ -33,6 +33,7 @@ bash scripts/prepare_cpu_online.sh
 | --- | --- | --- |
 | Python 3.11、pip、C/C++ 编译器 | `.runtime/py311/` | 两区共同使用的独立环境；编译器供 Triton 在 GPU 上首次运行时使用 |
 | CUDA 12.8 版 PyTorch 2.10.0、torchvision、HF 库及依赖 | 同一环境内 | CPU 区可以安装 GPU 版软件；此处不要求检测到 GPU |
+| PyTorch / CUDA wheel 及下载清单 | `.runtime/wheels/` | 大包先下载、续传、校验，再从本地安装；已完成包保留供重跑复用 |
 | FLA 0.6.0、Triton、causal-conv1d 1.7.0 | 同一环境内 | causal-conv1d 使用官方匹配 wheel，检查 SHA256，无需在 CPU 区编译 CUDA 扩展 |
 | Qwen3.5-4B 权重、tokenizer、processor | `assets/model/` | GPU 区从本地加载 |
 | GSM8K 与 MATH numeric | `assets/data/` | 下载后完成清洗、长度过滤和 train/calibration/audit/validation/test 分割 |
@@ -50,10 +51,31 @@ CPU_READY: all shared files are prepared.
 
 并存在 `.runtime/CPU_READY.json`。**下载报错或脚本中途退出，不算准备完成。**
 可在 CPU 区重新运行同一条命令；HF 会复用锁定版本和缓存，已安装的软件包通常不会重新下载。
-如果刚中断的是预编译 wheel 下载，该文件会重新下载并核对摘要。
+固定摘要的大包下载会保留 `.partial` 文件；重跑时，如果服务器支持 HTTP Range，就从保存位置续传。
+所有固定摘要文件必须校验通过后才能安装；如果服务端不支持续传，会提示并从头下载当前文件。
 不要在 GPU 训练同时修改这个共享环境或重新执行准备脚本。
 
-准备完成记录表示文件和环境已就绪，**不表示 H200 驱动和算子已经通过运行验证**。
+准备完成记录表示文件和环境已就绪，**不表示 GPU 驱动和算子已经通过运行验证**。
+
+### 下载很慢或想暂停更新
+
+第 2 步仅固定的 PyTorch / CUDA 依赖就约 4.13 GB，之后还有模型权重；单个 cuDNN 包并不是全部下载量。
+新版从 PyTorch 官方索引指向的 CDN 获取两个核心 wheel，从 PyPI 获取同版本 NVIDIA/Triton 依赖。
+这避免所有依赖都经过 PyTorch 下载站，但不能保证你所在网络的速度一定提高。
+
+如果当前仍在 `Downloading` / `Resuming`，可以按一次 Ctrl+C，等命令退出后再 `git pull --ff-only` 并重新执行准备脚本。
+如果已经进入环境的 `Linking` 或 pip 的 `Installing collected packages`，先等该安装步骤完成。
+保留 `.runtime` 和 `assets`；不要同时开第二个安装进程。
+
+升级前的 pip 缓存中，已完整下载且摘要匹配的 wheel 会尝试复用；旧 pip 临时下载中未完成的部分不保证能接续。
+新版持久续传针对固定摘要的 Torch/CUDA/causal-conv1d 文件；一般小型 Python 依赖仍由 pip 下载，模型由 HF 缓存管理。
+单独查看固定包下载计划（只读取元数据）可用：
+
+```bash
+.runtime/py311/bin/python scripts/torch_wheels.py --plan-only
+```
+
+如单独执行时仍需要项目证书，可在命令前加 `SSL_CERT_FILE="$PWD/.runtime/certs/ca-bundle.pem"`。
 
 ## 2. 进入 GPU 离线区
 
@@ -69,7 +91,7 @@ Python 应显示 3.11。激活脚本同时设置 HF 离线模式，禁止 pip �
 它适用于 bash 和 zsh，不修改 shell 的启动配置。原有 conda 提示符可能仍显示 `/etc/inspire`，以 `which python` 和 `python --version` 为准；退出该终端即可结束这次 PATH 切换。
 
 检查脚本会核对路径、版本、权重和数据摘要，并在两张 GPU 上做 BF16 运算，检查快速算子是否成功导入。
-驱动是否支持选定的 CUDA 运行时仍需以这里的实际结果为准。H200 型号本身不能证明驱动兼容。
+驱动是否支持选定的 CUDA 运行时仍需以这里的实际结果为准。GPU 型号本身不能证明驱动兼容。
 该方案不要求另装完整 CUDA toolkit 或运行 `nvcc`；服务器仍须提供有效的 NVIDIA 驱动及其运行库。
 
 通过后再执行模型级检查：

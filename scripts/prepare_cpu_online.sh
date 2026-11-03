@@ -51,8 +51,7 @@ fi
 
 printf '%s\n' '[2/6] Installing CUDA 12.8 PyTorch wheels (a GPU is NOT needed here).'
 "$DIG_PYTHON" -m pip install --upgrade pip setuptools wheel packaging ninja
-"$DIG_PYTHON" -m pip install torch==2.10.0 torchvision==0.25.0 \
-  --index-url https://download.pytorch.org/whl/cu128
+"$DIG_PYTHON" scripts/torch_wheels.py
 "$DIG_PYTHON" -m pip install -c requirements/h200-constraints.txt -e '.[server,test]'
 
 printf '%s\n' '[3/6] Downloading Qwen3.5-4B, GSM8K and MATH numeric; preparing fixed data splits.'

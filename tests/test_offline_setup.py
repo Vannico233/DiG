@@ -122,3 +122,72 @@ def test_failed_tls_is_never_retried_without_verification(tmp_path, monkeypatch)
     assert len(contexts) == 1 and contexts[0].check_hostname
     assert contexts[0].verify_mode == offline.ssl.CERT_REQUIRED
     assert not destination.exists()
+
+
+class DownloadResponse:
+    def __init__(self, chunks, status=200, **headers):
+        self.chunks, self.status, self.headers = list(chunks), status, headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def read(self, size):
+        chunk = self.chunks.pop(0) if self.chunks else b""
+        if isinstance(chunk, BaseException):
+            raise chunk
+        return chunk
+
+
+def test_pinned_download_resumes_after_user_interrupt_in_a_later_run(tmp_path, monkeypatch):
+    path = tmp_path / "large.whl"
+    expected = offline.hashlib.sha256(b"abcdef").hexdigest()
+    monkeypatch.setattr(offline, "open_verified", lambda *a, **k: DownloadResponse(
+        [b"abc", KeyboardInterrupt()], **{"Content-Length": "6"}))
+    with pytest.raises(KeyboardInterrupt):
+        offline.download("https://example.invalid/large", path, expected, size=6)
+    assert path.with_name("large.whl.partial").read_bytes() == b"abc"
+
+    def remaining(request, **kwargs):
+        assert request.get_header("Range") == "bytes=3-"
+        return DownloadResponse([b"def"], 206, **{"Content-Range": "bytes 3-5/6"})
+
+    monkeypatch.setattr(offline, "open_verified", remaining)
+    offline.download("https://example.invalid/large", path, expected, size=6)
+    assert path.read_bytes() == b"abcdef"
+
+
+def test_short_response_is_retried_from_the_saved_offset(tmp_path, monkeypatch):
+    responses = [DownloadResponse([b"abc"], **{"Content-Length": "6"}),
+                 DownloadResponse([b"def"], 206, **{"Content-Range": "bytes 3-5/6"})]
+    offsets = []
+    def respond(request, **kwargs):
+        offsets.append(request.get_header("Range"))
+        return responses.pop(0)
+    monkeypatch.setattr(offline, "open_verified", respond)
+    monkeypatch.setattr(offline.time, "sleep", lambda seconds: None)
+    path = tmp_path / "large.whl"
+    offline.download("https://example.invalid/large", path, offline.hashlib.sha256(b"abcdef").hexdigest(), size=6)
+    assert path.read_bytes() == b"abcdef" and offsets == [None, "bytes=3-"]
+
+
+def test_server_ignoring_range_restarts_without_duplicating_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "large.whl"
+    path.with_name("large.whl.partial").write_bytes(b"abc")
+    monkeypatch.setattr(offline, "open_verified", lambda *a, **k: DownloadResponse(
+        [b"abcdef"], **{"Content-Length": "6"}))
+    offline.download("https://example.invalid/large", path, offline.hashlib.sha256(b"abcdef").hexdigest(), size=6)
+    assert path.read_bytes() == b"abcdef"
+
+
+def test_wrong_range_never_corrupts_saved_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "large.whl"
+    partial = path.with_name("large.whl.partial")
+    partial.write_bytes(b"abc")
+    monkeypatch.setattr(offline, "open_verified", lambda *a, **k: DownloadResponse(
+        [b"abcdef"], 206, **{"Content-Range": "bytes 0-5/6"}))
+    with pytest.raises(RuntimeError, match="Content-Range"):
+        offline.download("https://example.invalid/large", path, "0" * 64, size=6)
+    assert partial.read_bytes() == b"abc" and not path.exists()

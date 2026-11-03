@@ -1,17 +1,20 @@
 """Shared Linux runtime preparation; bootstrap commands also work with Python 3.9."""
 import argparse
 import hashlib
+import http.client
 import importlib.metadata as metadata
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -106,20 +109,83 @@ def check_tls():
     print("TLS check passed for the micromamba download and its redirects.", flush=True)
 
 
-def download(url, path, expected=None):
+def download(url, path, expected=None, size=None, attempts=4):
+    """Keep pinned downloads across interruptions; only publish fully verified files."""
     path = Path(path)
     if path.is_file() and expected is not None and digest(path) == expected:
+        print("Verified cached", path.name, flush=True)
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     partial = path.with_name(path.name + ".partial")
-    request = urllib.request.Request(url, headers={"User-Agent": "DiG-offline-setup"})
-    print("Downloading", path.name, flush=True)
-    with open_verified(request) as response, partial.open("wb") as stream:
-        shutil.copyfileobj(response, stream, length=1024 * 1024)
-    if expected is not None and digest(partial) != expected:
-        raise RuntimeError("Downloaded wheel checksum mismatch; re-run CPU preparation")
-    os.replace(partial, path)
-    return path
+    for attempt in range(attempts):
+        # Covers Ctrl+C after the last byte but before verification/rename.
+        if expected and partial.is_file() and (size is None or partial.stat().st_size == size):
+            if digest(partial) == expected:
+                os.replace(partial, path)
+                return path
+        offset = partial.stat().st_size if expected and partial.is_file() else 0
+        headers = {"User-Agent": "DiG-offline-setup", "Accept-Encoding": "identity"}
+        if offset:
+            headers["Range"] = "bytes={}-".format(offset)
+        print("{} {} (saved {:.1f} MB)".format("Resuming" if offset else "Downloading",
+                                             path.name, offset / 1e6), flush=True)
+        try:
+            request = urllib.request.Request(url, headers=headers)
+            with open_verified(request) as response:
+                status = getattr(response, "status", 200)
+                response_headers = getattr(response, "headers", {})
+                total = size
+                if status == 206:
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", response_headers.get("Content-Range", ""))
+                    if not match or int(match[1]) != offset:
+                        raise RuntimeError("Invalid Content-Range; refusing to append download bytes")
+                    total = int(match[3])
+                    if size is not None and total != size:
+                        raise RuntimeError("Download size differs from the pinned metadata")
+                elif status == 200:
+                    if offset:
+                        print("Server ignored resume request; restarting this file.", flush=True)
+                    offset = 0
+                    length = response_headers.get("Content-Length")
+                    if length is not None:
+                        if size is not None and int(length) != size:
+                            raise RuntimeError("Download size differs from the pinned metadata")
+                        total = int(length)
+                else:
+                    raise RuntimeError("Unexpected download HTTP status: {}".format(status))
+                received, started, last_report = offset, time.monotonic(), time.monotonic()
+                with partial.open("ab" if offset else "wb") as stream:
+                    while True:
+                        block = response.read(256 * 1024)
+                        if not block:
+                            break
+                        stream.write(block)
+                        received += len(block)
+                        now = time.monotonic()
+                        if now - last_report >= 10:
+                            rate = (received - offset) / max(now - started, 0.001) / 1e6
+                            target = " / {:.1f} MB".format(total / 1e6) if total else ""
+                            print("  {:.1f} MB{} at {:.2f} MB/s".format(received / 1e6, target, rate), flush=True)
+                            last_report = now
+                if total is not None and received != total:
+                    raise ConnectionError("Incomplete response: {} / {} bytes".format(received, total))
+            if expected is not None and digest(partial) != expected:
+                partial.unlink()  # This file was downloaded by us and has failed integrity checking.
+                raise RuntimeError("Downloaded wheel checksum mismatch; re-run CPU preparation")
+            os.replace(partial, path)
+            return path
+        except urllib.error.HTTPError as error:
+            if error.code == 416 and offset:
+                partial.unlink()  # Stale/overlong partial; a valid complete file was handled above.
+            elif error.code not in (408, 429, 500, 502, 503, 504):
+                raise
+            failure = error
+        except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.IncompleteRead, ssl.SSLEOFError) as error:
+            failure = error
+        if attempt + 1 < attempts:
+            print("Connection interrupted; retrying from saved bytes.", flush=True)
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError("Download interrupted; rerun preparation. Pinned partial files are retained: {} ({})".format(partial, failure))
 
 
 def install_micromamba():
