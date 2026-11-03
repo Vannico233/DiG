@@ -21,6 +21,7 @@ from packaging.tags import sys_tags
 from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 from offline_setup import RUNTIME, digest, download, open_verified
+from pypi_routes import PYPI_MIRRORS, MIRROR_HOSTS, configure_mirror, wheel_download_url
 
 TORCH = dict(filename="torch-2.10.0+cu128-cp311-cp311-manylinux_2_28_x86_64.whl",
              sha256="1d01ffaebf64715c0f507a39463149cb19e596ff702bd4bcf862601f2881dabc", size=916750307)
@@ -29,36 +30,6 @@ VISION = dict(filename="torchvision-0.25.0+cu128-cp311-cp311-manylinux_2_28_x86_
 TORCH_METADATA_SHA256 = "7f56e1b49211bfcfe45a8c7df42d96a054f69a96fbf6bc4f1b6b6fe8d3f097a7"
 # Links and hashes from https://download.pytorch.org/whl/cu128/{torch,torchvision}/
 TORCH_CDN = "https://download-r2.pytorch.org/whl/cu128/"
-PYPI_MIRRORS = {
-    "tuna": "https://pypi.tuna.tsinghua.edu.cn",
-    "ustc": "https://mirrors.ustc.edu.cn/pypi",
-}
-MIRROR_HOSTS = ("pypi.tuna.tsinghua.edu.cn", "mirrors.tuna.tsinghua.edu.cn", "mirrors.ustc.edu.cn")
-
-
-def configure_mirror():
-    """Only bypass the proxy for domestic mirror hosts, within this process and its children."""
-    mirror = os.environ.get("DIG_PYPI_MIRROR", "official")
-    if mirror not in ("official", *PYPI_MIRRORS):
-        raise RuntimeError("DIG_PYPI_MIRROR must be official, tuna or ustc")
-    if mirror != "official":
-        exclusions = os.environ.get("no_proxy", os.environ.get("NO_PROXY", "")).split(",")
-        exclusions = [item for item in dict.fromkeys(exclusions + list(MIRROR_HOSTS)) if item]
-        os.environ["no_proxy"] = os.environ["NO_PROXY"] = ",".join(exclusions)
-        print("PyPI wheel mirror: {} (direct); original versions and SHA256 pins retained.".format(mirror), flush=True)
-    return mirror
-
-
-def wheel_download_url(item, mirror):
-    """Route PyPI package bytes to a mirror without mutating the original lock/plan."""
-    parsed = urllib.parse.urlsplit(item["url"])
-    if mirror == "official" or parsed.hostname != "files.pythonhosted.org":
-        return item["url"]
-    if (parsed.scheme != "https" or not parsed.path.startswith("/packages/")
-            or parsed.username or parsed.password or parsed.query or parsed.fragment
-            or urllib.parse.unquote(parsed.path.rsplit("/", 1)[-1]) != item["filename"]):
-        raise RuntimeError("Unexpected pinned PyPI file URL; refusing mirror rewrite")
-    return PYPI_MIRRORS[mirror] + parsed.path
 
 
 def accelerator_requirements(text):

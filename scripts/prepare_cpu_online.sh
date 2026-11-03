@@ -17,18 +17,6 @@ unset PYTHONHOME PYTHONPATH
 unset PIP_NO_INDEX HF_HUB_OFFLINE HF_DATASETS_OFFLINE TRANSFORMERS_OFFLINE
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 source "$DIG_ROOT/scripts/local_paths.sh"
-# Opt-in routing for PyPI only. PyTorch, GitHub and HF keep the inherited proxy.
-case "${DIG_PYPI_MIRROR:-official}" in
-  official) ;;
-  tuna) export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple ;;
-  ustc) export PIP_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/simple ;;
-  *) printf '%s\n' 'DIG_PYPI_MIRROR must be official, tuna or ustc.' >&2; exit 1 ;;
-esac
-if [[ "${DIG_PYPI_MIRROR:-official}" != official ]]; then
-  export no_proxy="${no_proxy:-${NO_PROXY:-}},pypi.tuna.tsinghua.edu.cn,mirrors.tuna.tsinghua.edu.cn,mirrors.ustc.edu.cn"
-  export NO_PROXY="$no_proxy"
-  printf 'PyPI mirror: %s (direct); other download hosts keep the existing proxy.\n' "$DIG_PYPI_MIRROR"
-fi
 export HF_HUB_DISABLE_TELEMETRY=1
 export TOKENIZERS_PARALLELISM=false
 export USE_HUB_KERNELS=NO
@@ -62,6 +50,24 @@ if [[ ! -x "$CC" || ! -x "$CXX" ]]; then
 fi
 
 printf '%s\n' '[2/6] Installing CUDA 12.8 PyTorch wheels (a GPU is NOT needed here).'
+# Probe on this host, after its Python and trusted certificates are available.
+if [[ "${DIG_PYPI_MIRROR:-official}" == auto ]]; then
+  DIG_PYPI_MIRROR="$("$DIG_PYTHON" scripts/pypi_routes.py)"
+  export DIG_PYPI_MIRROR
+fi
+case "${DIG_PYPI_MIRROR:-official}" in
+  official) ;;
+  tuna) export PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple ;;
+  ustc) export PIP_INDEX_URL=https://mirrors.ustc.edu.cn/pypi/simple ;;
+  aliyun) export PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple ;;
+  huawei) export PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple ;;
+  *) printf '%s\n' 'DIG_PYPI_MIRROR must be official, auto, tuna, ustc, aliyun or huawei.' >&2; exit 1 ;;
+esac
+if [[ "${DIG_PYPI_MIRROR:-official}" != official ]]; then
+  export no_proxy="${no_proxy:-${NO_PROXY:-}},pypi.tuna.tsinghua.edu.cn,mirrors.tuna.tsinghua.edu.cn,mirrors.ustc.edu.cn,mirrors.aliyun.com,repo.huaweicloud.com,mirrors.huaweicloud.com"
+  export NO_PROXY="$no_proxy"
+  printf 'PyPI mirror: %s (direct); other download hosts keep the existing proxy.\n' "$DIG_PYPI_MIRROR"
+fi
 "$DIG_PYTHON" -m pip install --upgrade pip setuptools wheel packaging ninja
 "$DIG_PYTHON" scripts/torch_wheels.py
 "$DIG_PYTHON" -m pip install -c requirements/h200-constraints.txt -e '.[server,test]'

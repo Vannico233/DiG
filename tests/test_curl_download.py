@@ -32,13 +32,18 @@ def curl_server(monkeypatch):
             raw = self.headers.get("Range")
             offset = int(raw.split("=")[1].split("-")[0]) if raw else 0
             state.offsets.append(offset)
+            if state.behavior == "forbidden":
+                self.send_response(403)
+                self.end_headers()
+                return
             if state.behavior == "ignore":
                 offset = 0
                 raw = None
             body = state.body[offset:]
             self.send_response(206 if raw else 200)
             if raw:
-                self.send_header("Content-Range", "bytes {}-{}/{}".format(offset, len(state.body) - 1, len(state.body)))
+                start = 0 if state.behavior == "wrong_range" else offset
+                self.send_header("Content-Range", "bytes {}-{}/{}".format(start, len(state.body) - 1, len(state.body)))
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             if state.behavior == "short" and len(state.offsets) == 1:
@@ -90,6 +95,32 @@ def test_curl_refused_resume_preserves_previous_progress(curl_server, tmp_path):
         offline.download(curl_server.url, path, hashlib.sha256(curl_server.body).hexdigest(), size=6)
     assert partial.read_bytes() == b"abc"
     assert not path.exists()
+
+
+def test_curl_http_403_does_not_truncate_the_saved_partial(curl_server, tmp_path):
+    curl_server.behavior = "forbidden"
+    path = tmp_path / "torch.whl"
+    partial = path.with_name(path.name + ".partial")
+    partial.write_bytes(b"abc")
+    with pytest.raises(RuntimeError, match="exit code 22"):
+        offline.download(curl_server.url, path, hashlib.sha256(curl_server.body).hexdigest(), size=6)
+    assert partial.read_bytes() == b"abc"
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("behavior,ok", [("normal", True), ("forbidden", False), ("ignore", False), ("wrong_range", False)])
+def test_mirror_probe_uses_saved_offset_and_requires_matching_range(curl_server, tmp_path, monkeypatch, behavior, ok):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    import pypi_routes as routes
+    monkeypatch.setitem(routes.PYPI_MIRRORS, "local", curl_server.url.rsplit("/", 1)[0])
+    curl_server.behavior = behavior
+    item = dict(filename="test.whl", url="https://files.pythonhosted.org/packages/test.whl", size=6)
+    partial = tmp_path / "test.whl.partial"
+    partial.write_bytes(b"abc")
+    result = routes.probe_route(item, 3, "local", tmp_path)
+    assert result["ok"] is ok
+    assert curl_server.offsets == [3]
+    assert partial.read_bytes() == b"abc"
 
 
 @pytest.mark.parametrize("wrong_size", [False, True])

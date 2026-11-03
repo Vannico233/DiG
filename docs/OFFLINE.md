@@ -96,11 +96,24 @@ curl 显示原生进度及传输结果；默认 urllib 模式同时显示最近�
 DIG_PYPI_MIRROR=tuna DIG_DOWNLOAD_TRANSPORT=curl bash scripts/prepare_cpu_online.sh
 ```
 
-`tuna` 使用清华镜像，也可改为 `ustc` 使用中科大镜像。准备脚本只在自身及子进程中设置 pip 源，并只对这些镜像域名绕过代理；PyTorch、GitHub、Hugging Face 仍沿用已有代理设置。
+`tuna` 使用清华镜像，也可选 `ustc`（中科大）、`aliyun`（阿里云）或 `huawei`（华为）。准备脚本只在自身及子进程中设置 pip 源，并只对这些镜像域名绕过代理；PyTorch、GitHub、Hugging Face 仍沿用已有代理设置。
 固定 CUDA 下载清单保留官方 URL、版本、文件大小和 SHA256，只在取文件时替换镜像地址。已下载的同名 `.partial` 直接续传，最终必须通过原始 SHA256 校验；完整且校验通过的包不会重新下载。
 镜像缺包、拒绝续传或校验失败时会报错，保留进度，不自动换包版本。若镜像不可用，重新以 `DIG_PYPI_MIRROR=official` 运行即可回到原来源。
 这个选项也会让后续普通 pip 安装使用同一镜像，但不改变模型/数据的下载来源，不保证实际提速。
 镜像说明：[清华 PyPI](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)、[中科大 PyPI](https://mirrors.ustc.edu.cn/help/pypi.html)。
+
+出现 HTTP 403 时，同一个来源的重复重试通常无助于解决拒绝访问；已保存的 `.partial` 不会因这个错误被清空。
+可让实际运行准备脚本的服务器先检测来源，再继续：
+
+```bash
+DIG_PYPI_MIRROR=auto DIG_DOWNLOAD_TRANSPORT=curl bash scripts/prepare_cpu_online.sh
+```
+
+它对第一个尚未完成的 PyPI wheel，从实际保存位置发起小范围请求，依次检查四个镜像直连和官方来源（继承已有代理）。每个来源最多短测 10 秒、正常响应最多取 2 MiB，不写入 wheel 文件；403、错误的 Content-Range、大小不符等结果会跳过。
+随后选择本次短测中可用且速度最高的来源，继续原流程。若都不可用则停止并保留下载文件。首次准备尚无清单时，使用一个已知的小 NVTX 包探测。
+短测只能反映当时的访问和速度，不保证整个文件持续同速，也不证明所有后续包都可访问；再次报错时可重跑自动检测。
+单独检测而不安装可执行 `SSL_CERT_FILE="$PWD/.runtime/certs/ca-bundle.pem" .runtime/py311/bin/python scripts/pypi_routes.py`。
+中科大在缓存未命中时可能重定向到清华，因此它们不一定是两条独立可用的下载路径；自动检测会跟随重定向检查最终响应。
 
 ## 2. 进入 GPU 离线区
 

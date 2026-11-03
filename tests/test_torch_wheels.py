@@ -125,6 +125,8 @@ def test_failed_metadata_queries_preserve_wheel_progress(wheels, tmp_path, monke
     ("official", "https://files.pythonhosted.org"),
     ("tuna", "https://pypi.tuna.tsinghua.edu.cn"),
     ("ustc", "https://mirrors.ustc.edu.cn/pypi"),
+    ("aliyun", "https://mirrors.aliyun.com/pypi"),
+    ("huawei", "https://repo.huaweicloud.com/repository/pypi"),
 ])
 def test_mirror_routes_same_object_without_changing_official_plan(wheels, mirror, base):
     item = dict(filename="triton-3.6.0-cp311-cp311-manylinux_2_28_x86_64.whl",
