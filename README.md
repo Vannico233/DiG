@@ -25,14 +25,16 @@ SGD、无动量、无权重衰减、无梯度裁剪；学习率 `eta0 / sqrt(ste
 
 ## 从零开始
 
-完整命令和故障排查见 [双 H200 运行指南](docs/SERVER.md)。
+当前服务器是 **CPU 区联网、GPU 区离线、两区共享目录**。请使用 [离线准备指南](docs/OFFLINE.md)，可从现有 Python 3.9 环境启动：
 
 ```bash
-git clone https://github.com/Vannico233/DiG.git
-cd DiG
-bash scripts/bootstrap_h200.sh
-source .venv/bin/activate
-python -m dig_rl.prepare --assets assets
+# CPU 联网区，在共享 DiG 仓库内
+git pull --ff-only
+bash scripts/prepare_cpu_online.sh
+
+# 准备成功后，进入 GPU 离线区的同一目录
+source scripts/activate_offline.sh
+python scripts/offline_setup.py gpu
 python -m dig_rl.launch --stage preflight --output runs/pilot01
 python -m dig_rl.launch --stage smoke --output runs/pilot01
 python -m dig_rl.launch --stage audit --output runs/pilot01
@@ -43,6 +45,8 @@ python -m dig_rl.summarize --run runs/pilot01
 ```
 
 每个阶段独立启动，不会自动接着跑整个实验。任何失败均返回非零状态。
+新环境放在 `.runtime/py311/`，不会修改 `/etc/inspire`；两区须使用相同的绝对路径。
+GPU 也能联网的独立机器使用 [双 H200 运行指南](docs/SERVER.md) 的在线安装流程。
 没有 GPU 的本地验证：`pip install -e '.[test]' && python -m pytest -q`。
 
 ## 审计与回退

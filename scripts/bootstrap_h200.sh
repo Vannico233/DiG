@@ -17,6 +17,7 @@ python -m pip install -c requirements/h200-constraints.txt 'fla-core>=0.4,<1'
 python -m pip install -c requirements/h200-constraints.txt 'causal-conv1d>=1.5.3,<2' --no-build-isolation
 python -m pip check
 python -m pip freeze > environment.lock.txt
-python -m pytest -q
+# Installed fast kernels are CUDA-only; the optional tiny-Qwen test creates a CPU model.
+python -m pytest -q --ignore=tests/test_qwen_integration.py
 python -c 'import torch; from dig_rl.runtime import fast_kernel_report; print(fast_kernel_report()); assert torch.cuda.is_available(), "CUDA unavailable"'
 printf '%s\n' 'Environment installed. Run prepare, preflight and smoke before audit/training. See docs/SERVER.md.'
