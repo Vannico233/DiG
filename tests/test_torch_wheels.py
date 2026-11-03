@@ -119,3 +119,54 @@ def test_failed_metadata_queries_preserve_wheel_progress(wheels, tmp_path, monke
         wheels.pypi_info("triton", "3.6.0", tmp_path, [], attempts=2)
     assert partial.read_bytes() == b"saved progress"
     assert not (tmp_path / "metadata/triton-3.6.0.json").exists()
+
+
+@pytest.mark.parametrize("mirror,base", [
+    ("official", "https://files.pythonhosted.org"),
+    ("tuna", "https://pypi.tuna.tsinghua.edu.cn"),
+    ("ustc", "https://mirrors.ustc.edu.cn/pypi"),
+])
+def test_mirror_routes_same_object_without_changing_official_plan(wheels, mirror, base):
+    item = dict(filename="triton-3.6.0-cp311-cp311-manylinux_2_28_x86_64.whl",
+                sha256="b" * 64, size=30)
+    path = "/packages/aa/bb/fixed/" + item["filename"]
+    item["url"] = "https://files.pythonhosted.org" + path
+    original = dict(item)
+    assert wheels.wheel_download_url(item, mirror) == base + path
+    assert item == original
+
+
+def test_pypi_mirror_does_not_change_pytorch_url(wheels):
+    item = dict(wheels.TORCH, url=wheels.TORCH_CDN + wheels.urllib.parse.quote(wheels.TORCH["filename"]))
+    assert wheels.wheel_download_url(item, "tuna") == item["url"]
+
+
+@pytest.mark.parametrize("url", [
+    "http://files.pythonhosted.org/packages/test.whl",
+    "https://files.pythonhosted.org/unexpected/test.whl",
+    "https://files.pythonhosted.org/packages/wrong.whl",
+    "https://files.pythonhosted.org/packages/test.whl?unexpected=1",
+])
+def test_mirror_refuses_unexpected_package_url(wheels, url):
+    with pytest.raises(RuntimeError, match="refusing mirror rewrite"):
+        wheels.wheel_download_url(dict(filename="test.whl", url=url), "tuna")
+
+
+def test_mirror_only_bypasses_proxy_for_mirror_hosts(wheels, monkeypatch):
+    monkeypatch.setenv("DIG_PYPI_MIRROR", "tuna")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
+    monkeypatch.setenv("no_proxy", "localhost,.cluster.internal")
+    monkeypatch.setenv("NO_PROXY", "localhost,.cluster.internal")
+    assert wheels.configure_mirror() == "tuna"
+    assert wheels.urllib.request.proxy_bypass_environment("pypi.tuna.tsinghua.edu.cn")
+    assert wheels.urllib.request.proxy_bypass_environment("node.cluster.internal")
+    for host in ("download-r2.pytorch.org", "files.pythonhosted.org", "huggingface.co"):
+        assert not wheels.urllib.request.proxy_bypass_environment(host)
+    assert wheels.urllib.request.getproxies_environment()["https"] == "http://127.0.0.1:7890"
+
+
+def test_official_mode_does_not_change_proxy_exclusions(wheels, monkeypatch):
+    monkeypatch.setenv("DIG_PYPI_MIRROR", "official")
+    monkeypatch.setenv("no_proxy", "localhost")
+    assert wheels.configure_mirror() == "official"
+    assert wheels.os.environ["no_proxy"] == "localhost"

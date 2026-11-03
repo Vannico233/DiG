@@ -90,6 +90,18 @@ DIG_DOWNLOAD_TRANSPORT=curl bash scripts/prepare_cpu_online.sh
 这只切换固定摘要安装文件的下载，不改变 pip、PyPI 元数据查询或 Hugging Face 的下载方式；不保证一定提速。
 curl 显示原生进度及传输结果；默认 urllib 模式同时显示最近报告区间的速度和本次连接平均速度，断线时输出具体原因。
 
+如果经过代理下载 PyPI 的 NVIDIA/Triton 包仍然很慢，可以对这些包改用国内镜像直连：
+
+```bash
+DIG_PYPI_MIRROR=tuna DIG_DOWNLOAD_TRANSPORT=curl bash scripts/prepare_cpu_online.sh
+```
+
+`tuna` 使用清华镜像，也可改为 `ustc` 使用中科大镜像。准备脚本只在自身及子进程中设置 pip 源，并只对这些镜像域名绕过代理；PyTorch、GitHub、Hugging Face 仍沿用已有代理设置。
+固定 CUDA 下载清单保留官方 URL、版本、文件大小和 SHA256，只在取文件时替换镜像地址。已下载的同名 `.partial` 直接续传，最终必须通过原始 SHA256 校验；完整且校验通过的包不会重新下载。
+镜像缺包、拒绝续传或校验失败时会报错，保留进度，不自动换包版本。若镜像不可用，重新以 `DIG_PYPI_MIRROR=official` 运行即可回到原来源。
+这个选项也会让后续普通 pip 安装使用同一镜像，但不改变模型/数据的下载来源，不保证实际提速。
+镜像说明：[清华 PyPI](https://mirrors.tuna.tsinghua.edu.cn/help/pypi/)、[中科大 PyPI](https://mirrors.ustc.edu.cn/help/pypi.html)。
+
 ## 2. 进入 GPU 离线区
 
 进入同一个共享 `DiG` 目录，每开一个新终端都执行：
