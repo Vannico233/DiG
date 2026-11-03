@@ -70,3 +70,55 @@ def test_moved_shared_environment_is_not_silently_accepted(tmp_path):
     saved = dict(root=str(tmp_path), prefix=str(tmp_path / "python"), packages={}, files={})
     with pytest.raises(RuntimeError, match="mount path"):
         offline.validate_ready(saved, tmp_path / "different-mount", tmp_path / "python", {}, {})
+
+
+@pytest.fixture
+def isolated_ca_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(offline, "RUNTIME", tmp_path)
+    monkeypatch.setattr(offline, "SYSTEM_CA_FILES", ())
+    for name in ("DIG_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT"):
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path
+
+
+def test_ca_bundle_uses_existing_roots_without_changing_source(isolated_ca_setup, monkeypatch):
+    roots = offline.ssl.create_default_context().get_ca_certs(binary_form=True)
+    assert roots, "Test host needs an existing trusted CA store"
+    original = offline.ssl.DER_cert_to_PEM_cert(roots[0])
+    source = isolated_ca_setup / "trusted-server-ca.pem"
+    source.write_text(original, encoding="ascii")
+    monkeypatch.setenv("DIG_CA_BUNDLE", str(source))
+    bundle = offline.prepare_certificates()
+    context = offline.ssl.create_default_context(cafile=str(bundle))
+    assert context.check_hostname
+    assert context.verify_mode == offline.ssl.CERT_REQUIRED
+    assert roots[0] in context.get_ca_certs(binary_form=True)
+    assert source.read_text(encoding="ascii") == original
+    assert bundle.parent == isolated_ca_setup / "certs"
+
+
+@pytest.mark.parametrize("content", [None, "not a CA certificate"])
+def test_invalid_explicit_ca_is_not_silently_ignored(isolated_ca_setup, monkeypatch, content):
+    source = isolated_ca_setup / "server-ca.pem"
+    if content is not None:
+        source.write_text(content, encoding="ascii")
+    monkeypatch.setenv("DIG_CA_BUNDLE", str(source))
+    with pytest.raises(RuntimeError, match="missing CA|Cannot read CA"):
+        offline.prepare_certificates()
+    assert not (isolated_ca_setup / "certs/ca-bundle.pem").exists()
+
+
+def test_failed_tls_is_never_retried_without_verification(tmp_path, monkeypatch):
+    contexts = []
+
+    def reject(*args, **kwargs):
+        contexts.append(kwargs["context"])
+        raise offline.urllib.error.URLError(offline.ssl.SSLCertVerificationError(1, "untrusted issuer"))
+
+    monkeypatch.setattr(offline.urllib.request, "urlopen", reject)
+    destination = tmp_path / "micromamba.tar.bz2"
+    with pytest.raises(RuntimeError, match="DIG_CA_BUNDLE"):
+        offline.download("https://example.invalid/archive", destination)
+    assert len(contexts) == 1 and contexts[0].check_hostname
+    assert contexts[0].verify_mode == offline.ssl.CERT_REQUIRED
+    assert not destination.exists()

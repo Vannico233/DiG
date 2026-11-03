@@ -106,7 +106,26 @@ python -m dig_rl.summarize --run runs/pilot01
 - **GPU 区 Python 还是 3.9：**在仓库根目录重新 source；检查 `which python` 是否指向 `.runtime/py311/bin/python`。如果设置过 `python` 的 shell alias，先去掉该 alias。
 - **缺少 CPU_READY：**回 CPU 区看准备脚本最先出现的错误并重跑，不能手动创建这个文件跳过检查。
 - **网络下载失败：**保存具体报错和站点；不要关闭 TLS 验证。离线区无法补齐缺失的包。
+- **第一步出现 `CERTIFICATE_VERIFY_FAILED`：**更新代码后重跑准备脚本。它会合并当前 Python、常见 Linux 系统路径以及已安装 certifi 中的可信 CA，保存到 `.runtime/certs/ca-bundle.pem`，供下载器、pip、HF 和 micromamba 使用；不会修改公共环境或系统证书。此修复解决已安装证书未被当前 Python 使用的情况，不能补出服务器根本没有的证书。
 - **CUDA 不可用或扩展导入失败：**保存 `nvidia-smi` 和检查脚本完整输出。需要根据驱动或库的实际报错处理；不要直接开始长实验。
 - **路径/依赖/代码/配置摘要不匹配：**回 CPU 区核对改动后重新准备。实验开始后保持环境固定；新增实验配置应独立规划，不与已有 run 混用。
 
+如果证书仍然失败，先只检查出错的下载连接（包含重定向，不下载完整安装包）：
+
+```bash
+python3 scripts/offline_setup.py tls-check
+```
+
+保留输出和 `.runtime/certs/sources.json`，其中记录证书来源，不记录代理密码或 token。
+若服务器网络使用专门的 CA，需从服务器管理员处取得可信的 **CA 证书文件**，将其路径传入后重跑。
+例如管理员已把文件提供在项目内的 `.runtime/certs/server-ca.pem` 时：
+
+```bash
+DIG_CA_BUNDLE="$PWD/.runtime/certs/server-ca.pem" bash scripts/prepare_cpu_online.sh
+```
+
+不要把网站返回的任意证书直接当作可信根，也不要使用关闭 SSL 校验的配置绕过此错误。
+该项目只复制公开 CA 证书，不需要服务器私钥。
+
 依据：[micromamba 官方安装说明](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html)、[PyTorch 官方版本组合](https://pytorch.org/get-started/previous-versions/)、[causal-conv1d v1.7.0 官方预编译包](https://github.com/Dao-AILab/causal-conv1d/releases/tag/v1.7.0)、[HF 离线环境变量](https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables)。
+证书配置依据：[Python SSL](https://docs.python.org/3.9/library/ssl.html)、[pip 证书配置](https://pip.pypa.io/en/stable/topics/https-certificates/)、[HTTPX 证书环境变量](https://www.python-httpx.org/environment_variables/)。

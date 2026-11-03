@@ -24,6 +24,14 @@ export USE_HUB_KERNELS=NO
 rm -f .runtime/CPU_READY.json
 
 printf '%s\n' '[1/6] Preparing a separate Python 3.11 environment; /etc/inspire is unchanged.'
+python3 scripts/offline_setup.py certificates
+# Share the discovered trust roots across urllib, pip, HTTPX/HF, requests and micromamba.
+export SSL_CERT_FILE="$DIG_ROOT/.runtime/certs/ca-bundle.pem"
+export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+export CURL_CA_BUNDLE="$SSL_CERT_FILE"
+export PIP_CERT="$SSL_CERT_FILE"
+export MAMBA_SSL_VERIFY="$SSL_CERT_FILE"
+export MAMBA_CACERT_PATH="$SSL_CERT_FILE"
 python3 scripts/offline_setup.py micromamba
 DIG_MAMBA="$DIG_ROOT/.runtime/tools/bin/micromamba"
 DIG_PREFIX="$DIG_ROOT/.runtime/py311"

@@ -7,14 +7,19 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / ".runtime"
+MICROMAMBA_URL = "https://micro.mamba.pm/api/micromamba/linux-64/latest"
+SYSTEM_CA_FILES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt",
+                   "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem", "/etc/ssl/ca-bundle.pem")
 WHEEL = "causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl"
 WHEEL_SHA256 = "b872d04d98c80856fd897660eac7129cc2ab51db9694530ce0cd24e1b57200fe"
 WHEEL_URL = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/" + WHEEL.replace("+", "%2B")
@@ -31,6 +36,76 @@ def digest(path):
     return h.hexdigest()
 
 
+def prepare_certificates():
+    """Read existing trusted roots, then write a project-local bundle; never disable TLS checks."""
+    context = ssl.create_default_context()
+    candidates = []
+    for name in ("DIG_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT"):
+        value = os.environ.get(name)
+        if value:
+            path = Path(value).expanduser().resolve()
+            if not path.is_file():
+                raise RuntimeError("{} points to a missing CA file: {}".format(name, path))
+            candidates.append(path)
+    candidates.extend(Path(path) for path in SYSTEM_CA_FILES if Path(path).is_file())
+    # This uses an existing installation only; no pip/network needed to bootstrap Python 3.9.
+    try:
+        import certifi
+    except ImportError:
+        pass
+    else:
+        candidates.append(Path(certifi.where()))
+    loaded = []
+    for path in dict.fromkeys(candidates):
+        try:
+            context.load_verify_locations(cafile=str(path))
+        except (OSError, ssl.SSLError) as error:
+            raise RuntimeError("Cannot read CA certificates from {}: {}".format(path, error)) from None
+        loaded.append(str(path))
+    certificates = sorted(set(context.get_ca_certs(binary_form=True)))
+    if not certificates:
+        raise RuntimeError("No trusted CA certificates found. Ask the server administrator for a CA bundle and set DIG_CA_BUNDLE")
+    directory = RUNTIME / "certs"
+    directory.mkdir(parents=True, exist_ok=True)
+    bundle = directory / "ca-bundle.pem"
+    tmp = bundle.with_suffix(".tmp")
+    tmp.write_text("".join(ssl.DER_cert_to_PEM_cert(cert) for cert in certificates), encoding="ascii")
+    # Re-open the generated bundle with normal hostname/certificate verification enabled.
+    ssl.create_default_context(cafile=str(tmp))
+    os.replace(tmp, bundle)
+    (directory / "sources.json").write_text(json.dumps(dict(
+        python=sys.version.split()[0], openssl=ssl.OPENSSL_VERSION,
+        default_paths=ssl.get_default_verify_paths()._asdict(),
+        additional_files=loaded, ca_count=len(certificates)), indent=2) + "\n", encoding="utf-8")
+    print("Trusted CA bundle: {} ({} certificates)".format(bundle, len(certificates)), flush=True)
+    return bundle
+
+
+def open_verified(request, **kwargs):
+    if "context" not in kwargs:
+        kwargs["context"] = ssl.create_default_context()
+    try:
+        return urllib.request.urlopen(request, timeout=120, **kwargs)
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, ssl.SSLCertVerificationError):
+            raise RuntimeError(
+                "TLS certificate verification failed. Run: python3 scripts/offline_setup.py tls-check. "
+                "If the server uses a private CA, obtain its CA bundle from the administrator and "
+                "set DIG_CA_BUNDLE to that file before rerunning preparation. TLS verification stays enabled."
+            ) from None
+        raise
+
+
+def check_tls():
+    bundle = prepare_certificates()
+    context = ssl.create_default_context(cafile=str(bundle))
+    request = urllib.request.Request(MICROMAMBA_URL, headers={"User-Agent": "DiG-offline-setup"})
+    # Includes the download service's redirects, but does not download the full archive.
+    with open_verified(request, context=context) as response:
+        response.read(1)
+    print("TLS check passed for the micromamba download and its redirects.", flush=True)
+
+
 def download(url, path, expected=None):
     path = Path(path)
     if path.is_file() and expected is not None and digest(path) == expected:
@@ -39,7 +114,7 @@ def download(url, path, expected=None):
     partial = path.with_name(path.name + ".partial")
     request = urllib.request.Request(url, headers={"User-Agent": "DiG-offline-setup"})
     print("Downloading", path.name, flush=True)
-    with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as stream:
+    with open_verified(request) as response, partial.open("wb") as stream:
         shutil.copyfileobj(response, stream, length=1024 * 1024)
     if expected is not None and digest(partial) != expected:
         raise RuntimeError("Downloaded wheel checksum mismatch; re-run CPU preparation")
@@ -51,7 +126,7 @@ def install_micromamba():
     binary = RUNTIME / "tools/bin/micromamba"
     if binary.is_file():
         return
-    archive = download("https://micro.mamba.pm/api/micromamba/linux-64/latest",
+    archive = download(MICROMAMBA_URL,
                        RUNTIME / "downloads/micromamba.tar.bz2")
     # Extract just the expected executable, never archive-supplied paths or links.
     with tarfile.open(archive, "r:bz2") as tar:
@@ -196,9 +271,13 @@ def readiness(seal=False, gpu=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("micromamba", "causal-wheel", "seal", "check", "gpu"))
+    parser.add_argument("stage", choices=("certificates", "tls-check", "micromamba", "causal-wheel", "seal", "check", "gpu"))
     args = parser.parse_args()
-    if args.stage == "micromamba":
+    if args.stage == "certificates":
+        prepare_certificates()
+    elif args.stage == "tls-check":
+        check_tls()
+    elif args.stage == "micromamba":
         install_micromamba()
     elif args.stage == "causal-wheel":
         check_runtime()
