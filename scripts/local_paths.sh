@@ -14,7 +14,8 @@ unset PIP_TARGET PIP_PREFIX PIP_ROOT PIP_LOG
 export MAMBA_ROOT_PREFIX="$DIG_ROOT/.runtime/mamba"
 export CONDA_PKGS_DIRS="$MAMBA_ROOT_PREFIX/pkgs"
 export CONDA_ENVS_DIRS="$MAMBA_ROOT_PREFIX/envs"
-export CONDA_ENVS_PATH="$CONDA_ENVS_DIRS"
+# Micromamba rejects these aliases when both are set, even to the same path.
+unset CONDA_ENVS_PATH
 export HF_HOME="$DIG_ROOT/assets/hf-cache"
 export HF_HUB_CACHE="$HF_HOME/hub"
 export HUGGINGFACE_HUB_CACHE="$HF_HUB_CACHE"
