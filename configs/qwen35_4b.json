@@ -1,0 +1,22 @@
+{
+  "horizon": 2048,
+  "max_prompt_tokens": 2048,
+  "group_size": 4,
+  "rollout_batch_size": 4,
+  "candidates": 8,
+  "lora_rank": 16,
+  "lora_alpha": 32,
+  "learning_rate": 0.01,
+  "max_steps": 200,
+  "budget_seconds": 14400,
+  "save_every": 25,
+  "seed": 13,
+  "calibration_size": 32,
+  "audit_size": 96,
+  "validation_size": 256,
+  "split_seed": 20261103,
+  "rho_grid": [0.125, 0.25, 0.5, 0.75],
+  "gate_relative_margin": 0.05,
+  "gate_alpha": 0.05,
+  "require_fast_kernels": true
+}

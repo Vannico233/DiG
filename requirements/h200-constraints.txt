@@ -1,0 +1,8 @@
+# HF interfaces exercised using a tiny random Qwen3.5 CPU model.
+# CUDA 12.8 / real H200 kernels still require server preflight.
+torch==2.10.0
+torchvision==0.25.0
+transformers==5.22.1
+peft==0.21.2
+accelerate==1.15.0
+huggingface-hub==1.33.0
