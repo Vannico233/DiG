@@ -10,6 +10,11 @@ offline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(offline)
 
 
+@pytest.fixture(autouse=True)
+def isolate_download_transport(monkeypatch):
+    monkeypatch.delenv("DIG_DOWNLOAD_TRANSPORT", raising=False)
+
+
 def test_download_reuses_verified_cache_and_repairs_corruption(tmp_path, monkeypatch):
     path = tmp_path / "kernel.whl"
     expected = offline.hashlib.sha256(b"complete wheel").hexdigest()

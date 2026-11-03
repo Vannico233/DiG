@@ -52,7 +52,7 @@ CPU_READY: all shared files are prepared.
 并存在 `.runtime/CPU_READY.json`。**下载报错或脚本中途退出，不算准备完成。**
 可在 CPU 区重新运行同一条命令；HF 会复用锁定版本和缓存，已安装的软件包通常不会重新下载。
 固定摘要的大包下载会保留 `.partial` 文件；重跑时，如果服务器支持 HTTP Range，就从保存位置续传。
-所有固定摘要文件必须校验通过后才能安装；如果服务端不支持续传，会提示并从头下载当前文件。
+所有固定摘要文件必须校验通过后才能安装；默认 urllib 方式遇到服务端忽略续传时，会提示并从头下载当前文件。可选 curl 方式遇到拒绝续传时则停止并保留进度。
 不要在 GPU 训练同时修改这个共享环境或重新执行准备脚本。
 
 准备完成记录表示文件和环境已就绪，**不表示 GPU 驱动和算子已经通过运行验证**。
@@ -78,6 +78,17 @@ CPU_READY: all shared files are prepared.
 ```
 
 如单独执行时仍需要项目证书，可在命令前加 `SSL_CERT_FILE="$PWD/.runtime/certs/ca-bundle.pem"`。
+
+如果 curl 对实际下载站的测速较快，可以切换固定摘要文件的下载方式：
+
+```bash
+DIG_DOWNLOAD_TRANSPORT=curl bash scripts/prepare_cpu_online.sh
+```
+
+在原下载进程退出后执行。curl 直接续传同一个 `.partial` 文件，不需要重新下载已保存部分；它继承当前终端的代理变量，并使用项目证书。
+完成后仍校验 SHA256 和已知文件大小。服务器拒绝续传时，curl 模式报错并保留进度，不自动从头覆盖。
+这只切换固定摘要安装文件的下载，不改变 pip、PyPI 元数据查询或 Hugging Face 的下载方式；不保证一定提速。
+curl 显示原生进度及传输结果；默认 urllib 模式同时显示最近报告区间的速度和本次连接平均速度，断线时输出具体原因。
 
 ## 2. 进入 GPU 离线区
 

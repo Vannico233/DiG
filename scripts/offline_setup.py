@@ -109,6 +109,70 @@ def check_tls():
     print("TLS check passed for the micromamba download and its redirects.", flush=True)
 
 
+def run_curl(command):
+    """Keep curl in the foreground and reap it before returning from Ctrl+C."""
+    process = subprocess.Popen(command)
+    try:
+        return process.wait()
+    except KeyboardInterrupt:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
+
+
+def download_curl(url, path, expected, size, attempts):
+    """Resume the same pinned partial as urllib; never publish unchecked curl output."""
+    executable = shutil.which("curl")
+    if not executable:
+        raise RuntimeError("DIG_DOWNLOAD_TRANSPORT=curl requires curl on PATH")
+    partial = path.with_name(path.name + ".partial")
+    for attempt in range(attempts):
+        offset = partial.stat().st_size if partial.is_file() else 0
+        if partial.is_file() and (size is None or offset == size):
+            if digest(partial) == expected:
+                os.replace(partial, path)
+                return path
+            if size is not None and offset == size:
+                raise RuntimeError("Downloaded wheel checksum mismatch; partial retained: " + str(partial))
+        if size is not None and offset > size:
+            raise RuntimeError("Partial exceeds the pinned file size; partial retained: " + str(partial))
+        print("{} {} with curl (saved {:.1f} MB; attempt {}/{})".format(
+            "Resuming" if offset else "Downloading", path.name, offset / 1e6, attempt + 1, attempts), flush=True)
+        # -q disables ~/.curlrc. Proxy variables remain inherited, as with urllib.
+        # Let our outer loop recompute the saved offset after every failed transfer.
+        command = [executable, "-q", "--fail", "--location", "--http1.1",
+                   "--proto", "=http,https", "--proto-redir", "=https",
+                   "--connect-timeout", "20", "--speed-limit", "1024", "--speed-time", "60",
+                   "--header", "Accept-Encoding: identity", "--continue-at", "-",
+                   "--output", str(partial), "--write-out",
+                   "\nCURL HTTP=%{http_code} received=%{size_download} average=%{speed_download} B/s\n"]
+        ca_file = os.environ.get("SSL_CERT_FILE") or os.environ.get("CURL_CA_BUNDLE")
+        if ca_file:
+            command.extend(["--cacert", ca_file])
+        command.extend(["--url", url])
+        code = run_curl(command)
+        if code == 0:
+            if size is not None and partial.stat().st_size != size:
+                raise RuntimeError("curl download size differs from pinned metadata; partial retained: " + str(partial))
+            if digest(partial) != expected:
+                raise RuntimeError("Downloaded wheel checksum mismatch; partial retained: " + str(partial))
+            os.replace(partial, path)
+            print("Verified downloaded", path.name, flush=True)
+            return path
+        if code in (33, 36):
+            raise RuntimeError("Server refused curl resume; saved bytes are unchanged. Partial retained: " + str(partial))
+        if code not in (5, 6, 7, 18, 28, 35, 52, 55, 56, 92):
+            raise RuntimeError("curl failed with exit code {}; partial retained: {}".format(code, partial))
+        if attempt + 1 < attempts:
+            print("curl interrupted (exit {}); retrying from saved bytes.".format(code), flush=True)
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError("curl download interrupted; rerun preparation. Partial retained: " + str(partial))
+
+
 def download(url, path, expected=None, size=None, attempts=4):
     """Keep pinned downloads across interruptions; only publish fully verified files."""
     path = Path(path)
@@ -116,6 +180,11 @@ def download(url, path, expected=None, size=None, attempts=4):
         print("Verified cached", path.name, flush=True)
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
+    transport = os.environ.get("DIG_DOWNLOAD_TRANSPORT", "urllib")
+    if transport not in ("urllib", "curl"):
+        raise RuntimeError("DIG_DOWNLOAD_TRANSPORT must be urllib or curl")
+    if transport == "curl" and expected is not None:
+        return download_curl(url, path, expected, size, attempts)
     partial = path.with_name(path.name + ".partial")
     for attempt in range(attempts):
         # Covers Ctrl+C after the last byte but before verification/rename.
@@ -154,6 +223,7 @@ def download(url, path, expected=None, size=None, attempts=4):
                 else:
                     raise RuntimeError("Unexpected download HTTP status: {}".format(status))
                 received, started, last_report = offset, time.monotonic(), time.monotonic()
+                last_received = offset
                 with partial.open("ab" if offset else "wb") as stream:
                     while True:
                         block = response.read(256 * 1024)
@@ -164,9 +234,12 @@ def download(url, path, expected=None, size=None, attempts=4):
                         now = time.monotonic()
                         if now - last_report >= 10:
                             rate = (received - offset) / max(now - started, 0.001) / 1e6
+                            recent_rate = (received - last_received) / max(now - last_report, 0.001) / 1e6
                             target = " / {:.1f} MB".format(total / 1e6) if total else ""
-                            print("  {:.1f} MB{} at {:.2f} MB/s".format(received / 1e6, target, rate), flush=True)
+                            print("  {:.1f} MB{} recent={:.2f} MB/s average={:.2f} MB/s".format(
+                                received / 1e6, target, recent_rate, rate), flush=True)
                             last_report = now
+                            last_received = received
                 if total is not None and received != total:
                     raise ConnectionError("Incomplete response: {} / {} bytes".format(received, total))
             if expected is not None and digest(partial) != expected:
@@ -183,7 +256,7 @@ def download(url, path, expected=None, size=None, attempts=4):
         except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.IncompleteRead, ssl.SSLEOFError) as error:
             failure = error
         if attempt + 1 < attempts:
-            print("Connection interrupted; retrying from saved bytes.", flush=True)
+            print("Connection interrupted ({}); retrying from saved bytes.".format(failure), flush=True)
             time.sleep(2 * (attempt + 1))
     raise RuntimeError("Download interrupted; rerun preparation. Pinned partial files are retained: {} ({})".format(partial, failure))
 
