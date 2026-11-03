@@ -1,4 +1,6 @@
 import importlib
+import io
+import json
 from pathlib import Path
 import pytest
 from packaging.tags import Tag
@@ -40,3 +42,80 @@ def test_old_pip_cache_is_only_reused_after_full_hash_verification(wheels, tmp_p
     wheels.reuse_pip_cache(plan, destination, cache)
     assert (destination / "package.whl").read_bytes() == b"right bytes"
     assert (cache / "complete.body").read_bytes() == b"right bytes"
+
+
+def cached_plan_fixture(wheels, tmp_path, monkeypatch):
+    metadata = "Requires-Dist: nvidia-cudnn-cu12==9.10.2.21\nRequires-Dist: triton==3.6.0\n"
+    (tmp_path / "torch.metadata").write_text(metadata, encoding="utf-8")
+    monkeypatch.setattr(wheels, "TORCH_METADATA_SHA256", wheels.digest(tmp_path / "torch.metadata"))
+    tags = [Tag("cp311", "cp311", "manylinux_2_28_x86_64"), Tag("py3", "none", "manylinux_2_27_x86_64")]
+    core = [dict(item, url=wheels.TORCH_CDN + wheels.urllib.parse.quote(item["filename"]))
+            for item in (wheels.TORCH, wheels.VISION)]
+    deps = [dict(filename="nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_x86_64.whl",
+                 url="https://files.pythonhosted.org/cudnn.whl", sha256="a" * 64, size=20),
+            dict(filename="triton-3.6.0-cp311-cp311-manylinux_2_28_x86_64.whl",
+                 url="https://files.pythonhosted.org/triton.whl", sha256="b" * 64, size=30)]
+    return core + deps, tags, wheels.accelerator_requirements(metadata)
+
+
+def deny_network(*args, **kwargs):
+    pytest.fail("A valid cached plan must not require network access")
+
+
+def test_previous_list_plan_resumes_with_network_unavailable(wheels, tmp_path, monkeypatch):
+    plan, tags, _ = cached_plan_fixture(wheels, tmp_path, monkeypatch)
+    (tmp_path / "torch-downloads.json").write_text(json.dumps(plan))
+    partial = tmp_path / (wheels.TORCH["filename"] + ".partial")
+    partial.write_bytes(b"already downloaded bytes")
+    monkeypatch.setattr(wheels, "open_verified", deny_network)
+    monkeypatch.setattr(importlib.import_module("offline_setup"), "open_verified", deny_network)
+    assert wheels.build_plan(tmp_path, tags) == plan
+    assert partial.read_bytes() == b"already downloaded bytes"
+
+
+@pytest.mark.parametrize("problem", ["missing", "version", "hash", "platform"])
+def test_incompatible_saved_plan_is_not_reused(wheels, tmp_path, monkeypatch, problem):
+    plan, tags, requirements = cached_plan_fixture(wheels, tmp_path, monkeypatch)
+    core = list(plan[:2])
+    if problem == "missing":
+        plan.pop()
+    elif problem == "version":
+        plan[-1]["filename"] = plan[-1]["filename"].replace("3.6.0", "3.7.0")
+    elif problem == "hash":
+        plan[-1]["sha256"] = "unfinished hash"
+    else:
+        plan[-1]["filename"] = plan[-1]["filename"].replace("manylinux_2_28_x86_64", "win_amd64")
+    assert not wheels.valid_cached_plan(plan, core, requirements, tags)
+
+
+def test_short_metadata_response_retries_then_uses_cache(wheels, tmp_path, monkeypatch):
+    entry = dict(filename="triton-3.6.0-cp311-cp311-manylinux_2_28_x86_64.whl",
+                 url="https://files.pythonhosted.org/triton.whl", size=30, digests={"sha256": "b" * 64})
+    info = {"urls": [entry]}
+    tags = [Tag("cp311", "cp311", "manylinux_2_28_x86_64")]
+    class Truncated(io.BytesIO):
+        def read(self, *args):
+            raise wheels.http.client.IncompleteRead(b"", 4330)
+    replies = [Truncated(), io.BytesIO(json.dumps(info).encode())]
+    monkeypatch.setattr(wheels, "open_verified", lambda *a, **k: replies.pop(0))
+    monkeypatch.setattr(wheels.time, "sleep", lambda seconds: None)
+    assert wheels.pypi_info("triton", "3.6.0", tmp_path, tags) == info
+    assert not replies
+    cache = tmp_path / "metadata/triton-3.6.0.json"
+    assert json.loads(cache.read_text()) == info
+    assert not cache.with_name(cache.name + ".tmp").exists()
+    monkeypatch.setattr(wheels, "open_verified", deny_network)
+    assert wheels.pypi_info("triton", "3.6.0", tmp_path, tags) == info
+
+
+def test_failed_metadata_queries_preserve_wheel_progress(wheels, tmp_path, monkeypatch):
+    partial = tmp_path / "torch.whl.partial"
+    partial.write_bytes(b"saved progress")
+    def fail(*args, **kwargs):
+        raise wheels.http.client.IncompleteRead(b"", 4330)
+    monkeypatch.setattr(wheels, "open_verified", fail)
+    monkeypatch.setattr(wheels.time, "sleep", lambda seconds: None)
+    with pytest.raises(RuntimeError, match="Saved wheel progress is unchanged"):
+        wheels.pypi_info("triton", "3.6.0", tmp_path, [], attempts=2)
+    assert partial.read_bytes() == b"saved progress"
+    assert not (tmp_path / "metadata/triton-3.6.0.json").exists()

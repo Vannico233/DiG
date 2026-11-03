@@ -69,6 +69,8 @@ CPU_READY: all shared files are prepared.
 
 升级前的 pip 缓存中，已完整下载且摘要匹配的 wheel 会尝试复用；旧 pip 临时下载中未完成的部分不保证能接续。
 新版持久续传针对固定摘要的 Torch/CUDA/causal-conv1d 文件；一般小型 Python 依赖仍由 pip 下载，模型由 HF 缓存管理。
+已有完整的 `.runtime/wheels/torch-downloads.json` 时，新版会核对包版本、平台和清单完整性，直接复用清单，不再查询 PyPI 元数据。
+首次查询的每个包信息会单独缓存，遇到短响应、断线或暂时性 HTTP 错误会重试。元数据查询失败不会删除或修改已保存的 wheel `.partial` 文件。
 单独查看固定包下载计划（只读取元数据）可用：
 
 ```bash

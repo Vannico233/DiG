@@ -1,12 +1,17 @@
 """Download pinned CUDA wheels persistently, then install them without another download."""
 import argparse
 from email.parser import Parser
+import http.client
 import json
 from pathlib import Path
 import platform
+import re
 import shutil
+import ssl
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -68,6 +73,73 @@ def select_wheel(info, name, version, tags):
                 sha256=entry["digests"]["sha256"], size=entry["size"])
 
 
+def write_json_atomic(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def pypi_info(name, version, directory, tags, attempts=4):
+    """Cache only complete usable responses; retry short HTTP bodies as well as connection failures."""
+    path = directory / "metadata" / (name + "-" + version + ".json")
+    if path.is_file():
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+            select_wheel(info, name, version, tags)
+            print("Verified cached package metadata:", name, flush=True)
+            return info
+        except (ValueError, KeyError, TypeError, RuntimeError):
+            print("Rebuilding invalid package metadata cache:", name, flush=True)
+    url = "https://pypi.org/pypi/{}/{}/json".format(name, version)
+    for attempt in range(attempts):
+        try:
+            print("Reading package metadata: {}=={} ({}/{})".format(name, version, attempt + 1, attempts), flush=True)
+            request = urllib.request.Request(url, headers={"User-Agent": "DiG-offline-setup"})
+            with open_verified(request) as response:
+                info = json.load(response)
+            select_wheel(info, name, version, tags)
+            write_json_atomic(path, info)
+            return info
+        except urllib.error.HTTPError as error:
+            if error.code not in (408, 429, 500, 502, 503, 504):
+                raise
+            failure = error
+        except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.IncompleteRead,
+                ssl.SSLEOFError, json.JSONDecodeError, UnicodeDecodeError) as error:
+            failure = error
+        if attempt + 1 < attempts:
+            print("Package metadata transfer interrupted; retrying. Wheel partial files are unchanged.", flush=True)
+            time.sleep(2 * (attempt + 1))
+    raise RuntimeError("Cannot read {}=={} metadata after {} attempts. Saved wheel progress is unchanged: {}".format(
+        name, version, attempts, failure)) from failure
+
+
+def valid_cached_plan(plan, core, requirements, tags):
+    """Accept the previously saved list format only if versions, coverage and platform still match."""
+    if not isinstance(plan, list) or len(plan) != len(core) + len(requirements) or plan[:len(core)] != core:
+        return False
+    expected = {name: Version(version) for name, version in requirements}
+    seen = set()
+    try:
+        for item in plan[len(core):]:
+            filename = item["filename"]
+            if "/" in filename or "\\" in filename:
+                return False
+            name, version, _, wheel_tags = parse_wheel_filename(filename)
+            url = urllib.parse.urlparse(item["url"])
+            if (expected.get(name) != version or name in seen or not (wheel_tags & set(tags))
+                    or type(item["size"]) is not int or item["size"] <= 0
+                    or not re.fullmatch("[0-9a-f]{64}", item["sha256"])
+                    or url.scheme != "https" or url.hostname != "files.pythonhosted.org"
+                    or url.username is not None or url.password is not None):
+                return False
+            seen.add(name)
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return seen == set(expected)
+
+
 def build_plan(directory, tags=None):
     tags = list(sys_tags()) if tags is None else list(tags)
     plan = [dict(item, url=TORCH_CDN + urllib.parse.quote(item["filename"])) for item in (TORCH, VISION)]
@@ -75,11 +147,21 @@ def build_plan(directory, tags=None):
         if not (parse_wheel_filename(item["filename"])[3] & set(tags)):
             raise RuntimeError("This host cannot install the pinned Linux Python 3.11 wheels (glibc >= 2.28 required)")
     metadata_file = download(plan[0]["url"] + ".metadata", directory / "torch.metadata", TORCH_METADATA_SHA256)
-    for name, version in accelerator_requirements(metadata_file.read_text(encoding="utf-8")):
-        url = "https://pypi.org/pypi/{}/{}/json".format(name, version)
-        with open_verified(urllib.request.Request(url, headers={"User-Agent": "DiG-offline-setup"})) as response:
-            info = json.load(response)
+    requirements = accelerator_requirements(metadata_file.read_text(encoding="utf-8"))
+    plan_path = directory / "torch-downloads.json"
+    if plan_path.is_file():
+        try:
+            cached = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            cached = None
+        if valid_cached_plan(cached, plan, requirements, tags):
+            print("Using cached CUDA download plan; skipping PyPI metadata requests.", flush=True)
+            return cached
+        print("Saved download plan is incomplete or incompatible; rebuilding metadata only.", flush=True)
+    for name, version in requirements:
+        info = pypi_info(name, version, directory, tags)
         plan.append(select_wheel(info, name, version, tags))
+    write_json_atomic(plan_path, plan)
     return plan
 
 
@@ -118,7 +200,6 @@ def main():
     directory = RUNTIME / "wheels"
     directory.mkdir(parents=True, exist_ok=True)
     plan = build_plan(directory)
-    (directory / "torch-downloads.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
     total = sum(item["size"] for item in plan)
     print("Pinned CUDA wheel set: {} files, {:.2f} GB before cache reuse.".format(len(plan), total / 1e9), flush=True)
     for item in plan:
