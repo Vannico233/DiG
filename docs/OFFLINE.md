@@ -166,6 +166,7 @@ python -m dig_rl.summarize --run runs/pilot01
 - **GPU 区 Python 还是 3.9：**在仓库根目录重新 source；检查 `which python` 是否指向 `.runtime/py311/bin/python`。如果设置过 `python` 的 shell alias，先去掉该 alias。
 - **缺少 CPU_READY：**回 CPU 区看准备脚本最先出现的错误并重跑，不能手动创建这个文件跳过检查。
 - **网络下载失败：**保存具体报错和站点；不要关闭 TLS 验证。离线区无法补齐缺失的包。
+- **第 3 步提示 SOCKS proxy 缺少 `socksio`：**更新代码后重跑准备脚本。`server` 依赖已包含 `httpx[socks]`，会在第 2 步补齐该小包并复用已有大包。HTTPX 会读取 `HTTP_PROXY`、`HTTPS_PROXY` 和 `ALL_PROXY`；即使 HTTPS 使用 HTTP 代理，初始化时也可能因另一条 SOCKS 配置而要求该依赖。脚本不会因此删除或修改你的代理设置。[HTTPX SOCKS 文档](https://www.python-httpx.org/advanced/proxies/#socks)
 - **第一步出现 `CERTIFICATE_VERIFY_FAILED`：**更新代码后重跑准备脚本。它会合并当前 Python、常见 Linux 系统路径以及已安装 certifi 中的可信 CA，保存到 `.runtime/certs/ca-bundle.pem`，供下载器、pip、HF 和 micromamba 使用；不会修改公共环境或系统证书。此修复解决已安装证书未被当前 Python 使用的情况，不能补出服务器根本没有的证书。
 - **CUDA 不可用或扩展导入失败：**保存 `nvidia-smi` 和检查脚本完整输出。需要根据驱动或库的实际报错处理；不要直接开始长实验。
 - **路径/依赖/代码/配置摘要不匹配：**回 CPU 区核对改动后重新准备。实验开始后保持环境固定；新增实验配置应独立规划，不与已有 run 混用。

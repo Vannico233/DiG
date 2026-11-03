@@ -302,7 +302,7 @@ def installed_packages():
         actual = metadata.version(name)
         if actual.split("+")[0] != expected:
             raise RuntimeError("Unexpected {} version: {}; expected {}".format(name, actual, expected))
-    for name in ("datasets", "triton", "numpy", "safetensors", "tokenizers", "ninja", "packaging"):
+    for name in ("datasets", "triton", "numpy", "safetensors", "tokenizers", "ninja", "packaging", "httpx", "socksio"):
         metadata.version(name)  # All these packages must already exist before going offline.
     return {dist.metadata["Name"].lower().replace("_", "-"): dist.version
             for dist in metadata.distributions() if dist.metadata["Name"]}
