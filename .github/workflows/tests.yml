@@ -9,6 +9,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: python -m pip install -e '.[test]'
-      - run: python -m pip install transformers==5.22.1 peft==0.21.2 accelerate==1.15.0 huggingface-hub==1.33.0 pillow
+      - run: >-
+          python -m pip install -e '.[server,test]'
+          transformers==5.22.1 peft==0.21.2 accelerate==1.15.0 huggingface-hub==1.33.0
       - run: python -m pytest -q

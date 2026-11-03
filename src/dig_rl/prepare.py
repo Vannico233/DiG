@@ -6,6 +6,7 @@ from pathlib import Path
 from .config import Config
 from .data import normalize, split_rows
 from .io import sha256, write_json, write_jsonl
+from .hf_downloads import hf_retry, resolve_revisions
 from .runtime import prompt_ids, demo_ids
 
 
@@ -16,7 +17,11 @@ def main():
     p.add_argument("--model-revision", default="main")
     p.add_argument("--gsm8k-revision", default="main")
     p.add_argument("--math-revision", default="main")
+    p.add_argument("--network-attempts", type=int, default=4)
+    p.add_argument("--metadata-only", action="store_true", help="Resolve/save repository revisions without downloading model weights")
     args = p.parse_args()
+    if args.network_attempts < 1:
+        p.error("--network-attempts must be positive")
     from huggingface_hub import HfApi, snapshot_download
     from transformers import AutoProcessor
     from datasets import load_dataset
@@ -26,19 +31,14 @@ def main():
     requested = {"model": ("Qwen/Qwen3.5-4B", args.model_revision),
                  "gsm8k": ("openai/gsm8k", args.gsm8k_revision),
                  "math_numeric": ("jeggers/competition_math", args.math_revision)}
-    if lock_path.exists():
-        lock = json.loads(lock_path.read_text())
-        if lock["requested"] != {k: list(v) for k, v in requested.items()}:
-            raise ValueError("Download revisions differ from lock; use a new assets directory")
-    else:
-        lock = {"requested": requested, "resolved": {}}
-        for key, (repo, rev) in requested.items():
-            info = api.model_info(repo, revision=rev) if key == "model" else api.dataset_info(repo, revision=rev)
-            lock["resolved"][key] = info.sha
-        write_json(lock_path, lock)
+    lock = resolve_revisions(api, requested, lock_path, attempts=args.network_attempts)
+    if args.metadata_only:
+        print("Repository revisions saved. Model weights were not downloaded.", flush=True)
+        return
     model_dir = args.assets / "model"
-    snapshot_download(requested["model"][0], revision=lock["resolved"]["model"], local_dir=model_dir,
-                      allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt", "*.jinja", "*.tiktoken"])
+    hf_retry("Downloading pinned model snapshot", lambda: snapshot_download(
+        requested["model"][0], revision=lock["resolved"]["model"], local_dir=model_dir,
+        allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt", "*.jinja", "*.tiktoken"]), args.network_attempts)
     write_json(model_dir / "dig_model.json", {"repo": requested["model"][0], "revision": lock["resolved"]["model"]})
     processor = AutoProcessor.from_pretrained(model_dir, local_files_only=True)
     for name, subset in (("gsm8k", "main"), ("math_numeric", "numeric")):
@@ -53,7 +53,8 @@ def main():
                     raise ValueError("Prepared data checksum mismatch")
             print(f"Verified existing {name}", flush=True)
             continue
-        source = load_dataset(requested[name][0], subset, revision=lock["resolved"][name])
+        source = hf_retry("Loading pinned dataset " + name, lambda: load_dataset(
+            requested[name][0], subset, revision=lock["resolved"][name]), args.network_attempts)
         eligible, excluded = {}, []
         for split in ("train", "test"):
             eligible[split] = []
