@@ -16,13 +16,10 @@ unset PYTHONHOME PYTHONPATH
 # Allow re-running after a previous offline activation in the same terminal.
 unset PIP_NO_INDEX HF_HUB_OFFLINE HF_DATASETS_OFFLINE TRANSFORMERS_OFFLINE
 export PIP_DISABLE_PIP_VERSION_CHECK=1
-export PIP_CACHE_DIR="$DIG_ROOT/.runtime/pip-cache"
-export MAMBA_ROOT_PREFIX="$DIG_ROOT/.runtime/mamba"
-export HF_HOME="$DIG_ROOT/assets/hf-cache"
+source "$DIG_ROOT/scripts/local_paths.sh"
 export HF_HUB_DISABLE_TELEMETRY=1
 export TOKENIZERS_PARALLELISM=false
 export USE_HUB_KERNELS=NO
-mkdir -p .runtime
 # An interrupted or changed preparation must never leave an old success marker.
 rm -f .runtime/CPU_READY.json
 
