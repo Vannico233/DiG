@@ -35,7 +35,10 @@ def append_json(path, row):
 
 
 def read_rows(path):
-    rows = [json.loads(s) for s in Path(path).read_text(encoding="utf-8").splitlines() if s.strip()]
+    # JSON strings can contain Unicode line separators; only physical lines
+    # delimit JSONL records.
+    with Path(path).open(encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream if line.strip()]
     if not rows or any(not all(r.get(k) for k in ("id", "question", "answer", "demo")) for r in rows):
         raise ValueError(f"Invalid/empty prepared dataset: {path}")
     if len({r["id"] for r in rows}) != len(rows):
