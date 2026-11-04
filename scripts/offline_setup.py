@@ -28,7 +28,8 @@ WHEEL_SHA256 = "b872d04d98c80856fd897660eac7129cc2ab51db9694530ce0cd24e1b57200fe
 WHEEL_URL = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/" + WHEEL.replace("+", "%2B")
 PACKAGES = {"torch": "2.10.0", "torchvision": "0.25.0", "transformers": "5.22.1",
             "peft": "0.21.2", "accelerate": "1.15.0", "huggingface-hub": "1.33.0",
-            "fla-core": "0.6.0", "causal-conv1d": "1.7.0"}
+            "fla-core": "0.6.0", "causal-conv1d": "1.7.0",
+            "triton": "3.6.0", "tilelang": "0.1.15"}
 
 
 def digest(path):
@@ -320,6 +321,27 @@ def check_compiler():
         import ctypes
         if ctypes.CDLL(str(lib)).dig_check() != 7:
             raise RuntimeError("C compiler/loader check failed")
+    check_cuda_compiler()
+
+
+def check_cuda_compiler():
+    """Compile a Hopper kernel on CPU, including TileLang's compiler adapter."""
+    cuda = RUNTIME / "cuda128"
+    nvcc = cuda / "bin/nvcc"
+    host = cuda / "bin/x86_64-conda-linux-gnu-c++"
+    if not nvcc.is_file() or not host.is_file():
+        raise RuntimeError("Hopper toolchain missing: run CPU preparation to install TileLang and CUDA 12.8")
+    if Path(os.environ.get("CUDA_HOME", "")).resolve() != cuda.resolve():
+        raise RuntimeError("Source scripts/activate_offline.sh to select the project CUDA compiler")
+    result = subprocess.run([str(nvcc), "--version"], capture_output=True, text=True, check=True)
+    if "release 12.8," not in result.stdout:
+        raise RuntimeError("Expected CUDA compiler 12.8")
+    from tilelang.contrib.nvcc import compile_cuda
+    cubin = compile_cuda('extern "C" __global__ void dig_check(float* x) { x[threadIdx.x] = 1.0f; }',
+                         target_format="cubin", arch="sm_90")
+    if not cubin:
+        raise RuntimeError("TileLang produced an empty Hopper kernel")
+    print("TileLang CUDA 12.8 compiler check passed (compiled sm_90; no GPU execution).", flush=True)
 
 
 def local_assets():
@@ -354,7 +376,7 @@ def local_assets():
         files += [directory / "manifest.json"] + [directory / (split + ".jsonl") for split in required]
     files += [ROOT / "assets/download_lock.json", ROOT / "configs/qwen35_4b.json",
               ROOT / "requirements/h200-constraints.txt", ROOT / "pyproject.toml",
-              RUNTIME / "pip-freeze.txt", RUNTIME / "conda-explicit.txt"]
+              RUNTIME / "pip-freeze.txt", RUNTIME / "conda-explicit.txt", RUNTIME / "cuda-explicit.txt"]
     files += sorted((ROOT / "src").rglob("*.py")) + sorted((ROOT / "scripts").glob("*.*"))
     return {p.relative_to(ROOT).as_posix(): digest(p) for p in sorted(set(files))}
 

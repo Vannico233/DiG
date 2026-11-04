@@ -100,6 +100,9 @@ printf '%s\n' '[4/6] Installing FLA and the official prebuilt causal-conv1d whee
 "$DIG_PYTHON" -m pip check
 
 printf '%s\n' '[5/6] Recording the installed environment and checking CPU-safe project tests.'
+bash scripts/prepare_hopper.sh
+source scripts/cuda_paths.sh
+"$DIG_PYTHON" -m pip check
 "$DIG_PYTHON" -m pip freeze > .runtime/pip-freeze.txt
 "$DIG_MAMBA" list --no-rc -p "$DIG_PREFIX" --explicit > .runtime/conda-explicit.txt
 # The optional tiny-Qwen integration may bind GPU kernels once FLA is installed.

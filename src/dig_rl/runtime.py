@@ -40,6 +40,17 @@ def fast_kernel_report():
         result["kernels"] = {name: optimized_binding(getattr(m, name, None) or getattr(m, alias, None))
                              for name, alias in aliases.items()}
         result["fast_path"] = all(result["kernels"].values())
+        if torch.cuda.is_available():
+            from .hopper import needs_tilelang
+            if needs_tilelang(torch.cuda.get_device_capability(), result["versions"]["triton"]):
+                import os
+                from fla.ops.common.backends.tilelang import CommonTileLangBackend
+                backend = CommonTileLangBackend()
+                ready = (backend.is_available() and backend.is_enabled()
+                         and os.environ.get("FLA_DISABLE_BACKEND_DISPATCH") != "1")
+                result["hopper_backward_backend"] = "tilelang" if ready else "unavailable"
+                if not ready:
+                    result.update(fast_path=False, error="Hopper/Triton requires TileLang and usable nvcc; re-run CPU preparation and source activate_offline.sh")
     except Exception as e:
         result.update(fast_path=False, error=f"{type(e).__name__}: {e}")
     return result

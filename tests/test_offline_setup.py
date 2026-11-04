@@ -77,6 +77,23 @@ def test_moved_shared_environment_is_not_silently_accepted(tmp_path):
         offline.validate_ready(saved, tmp_path / "different-mount", tmp_path / "python", {}, {})
 
 
+def test_hopper_compiler_missing_is_rejected_before_sealing(tmp_path, monkeypatch):
+    monkeypatch.setattr(offline, "RUNTIME", tmp_path)
+    with pytest.raises(RuntimeError, match="Hopper toolchain missing"):
+        offline.check_cuda_compiler()
+
+
+def test_hopper_compiler_wrong_environment_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(offline, "RUNTIME", tmp_path)
+    directory = tmp_path / "cuda128/bin"
+    directory.mkdir(parents=True)
+    for name in ("nvcc", "x86_64-conda-linux-gnu-c++"):
+        (directory / name).touch()
+    monkeypatch.setenv("CUDA_HOME", str(tmp_path / "wrong"))
+    with pytest.raises(RuntimeError, match="Source scripts/activate_offline"):
+        offline.check_cuda_compiler()
+
+
 @pytest.fixture
 def isolated_ca_setup(tmp_path, monkeypatch):
     monkeypatch.setattr(offline, "RUNTIME", tmp_path)

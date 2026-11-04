@@ -166,7 +166,18 @@ Python 应显示 3.11。激活脚本同时设置 HF 离线模式，禁止 pip �
 
 检查脚本会核对路径、版本、权重和数据摘要，并在两张 GPU 上做 BF16 运算，检查快速算子是否成功导入。
 驱动是否支持选定的 CUDA 运行时仍需以这里的实际结果为准。GPU 型号本身不能证明驱动兼容。
-该方案不要求另装完整 CUDA toolkit 或运行 `nvcc`；服务器仍须提供有效的 NVIDIA 驱动及其运行库。
+H100/H200 使用的 Hopper 架构与 Triton 3.6.0 存在 FLA 门控反向算子的已知兼容问题。
+保留 PyTorch 2.10.0 要求的 Triton 3.6.0，并安装 TileLang 0.1.15 作为官方替代后端。
+CPU 准备会在 `.runtime/cuda128` 安装 CUDA 12.8 的 nvcc、头文件和配套主机编译器，
+不会修改平台 CUDA 或驱动；离线激活自动设置 CUDA_HOME、nvcc 路径和项目内 TileLang 缓存。
+CPU 验收会通过 TileLang 编译一个 sm_90 内核；GPU 检查额外确认 Hopper 替代后端可用。
+编译成功不代表已经执行 GPU 反向传播，仍需通过下面的 preflight。
+
+已有环境遇到 `gated chunk_bwd_dqkwg` 的 Triton 版本错误时，在 CPU 联网空间更新修复后运行
+`bash scripts/resume_cpu_online.sh`，保留模型、数据及失败日志。GPU 新终端重新激活后，
+用新的输出目录（例如 `runs/pilot02`）运行预检；旧目录已有阶段状态，不能直接重复 launch。
+不要删掉 FLA 的版本检查或强制替换 PyTorch 锁定的 Triton。
+依据：[FLA Hopper 替代后端](https://github.com/fla-org/flash-linear-attention/blob/v0.6.0/fla/ops/common/backends/tilelang/__init__.py)。
 
 通过后再执行模型级检查：
 

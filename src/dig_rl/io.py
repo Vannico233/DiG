@@ -87,7 +87,7 @@ def code_id():
 def version_info():
     import importlib.metadata as m
     info = {}
-    for name in ("torch", "transformers", "peft", "datasets", "huggingface-hub", "fla-core", "causal-conv1d"):
+    for name in ("torch", "transformers", "peft", "datasets", "huggingface-hub", "fla-core", "causal-conv1d", "triton", "tilelang"):
         try:
             info[name] = m.version(name)
         except m.PackageNotFoundError:

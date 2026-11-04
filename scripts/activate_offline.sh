@@ -16,6 +16,7 @@ unset PYTHONHOME
 export PYTHONPATH="$DIG_ROOT/src"
 export CC="$DIG_ROOT/.runtime/py311/bin/x86_64-conda-linux-gnu-cc"
 export CXX="$DIG_ROOT/.runtime/py311/bin/x86_64-conda-linux-gnu-c++"
+. "$DIG_ROOT/scripts/cuda_paths.sh" || return 1
 export HF_HUB_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export HF_HUB_DISABLE_TELEMETRY=1
