@@ -192,6 +192,9 @@ FLA/Triton 在第一次 GPU 运行时会本地编译、生成缓存，因此首�
 
 ## 3. 审计、训练、评估
 
+如果希望在审计未通过后仍做真实训练对照，使用[四卡探索性实验](EXPLORATORY.md)。
+它保留原审计结论，并区分训练成本与包含审计的总成本；下面的原入口仍执行门槛筛选。
+
 ```bash
 python -m dig_rl.launch --stage audit --output runs/pilot01
 ```
