@@ -124,15 +124,18 @@ def download_weight(url, path, item, attempts=4):
 
 
 def download_model_weights(api, repo, revision, directory, attempts=4):
-    from huggingface_hub import hf_hub_url
+    from .model_transfer import download_parallel, transfer_lock, weight_routes
     directory = Path(directory)
-    items = weight_plan(api, repo, revision, directory, attempts)
-    print("Persistent model weights: {} files; {:.2f} GB before cache reuse.".format(
-        len(items), sum(item["size"] for item in items) / 1e9), flush=True)
-    for item in items:
-        url = hf_hub_url(repo, filename=item["filename"], revision=revision,
-                         endpoint="https://huggingface.co")
-        download_weight(url, directory / item["filename"], item, attempts)
+    workers = int(os.environ.get("DIG_MODEL_CONNECTIONS", "4"))
+    source = os.environ.get("DIG_MODEL_SOURCE", "auto")
+    with transfer_lock(directory / ".dig-downloads"):
+        items = weight_plan(api, repo, revision, directory, attempts)
+        print("Persistent model weights: {} files; {:.2f} GB before cache reuse.".format(
+            len(items), sum(item["size"] for item in items) / 1e9), flush=True)
+        for item in items:
+            routes = weight_routes(repo, revision, item, source)
+            download_parallel(routes, directory / item["filename"], item,
+                              workers=workers, attempts=max(12, attempts))
 
 
 def download_model_snapshot(api, repo, revision, directory, attempts=4, transport="curl"):

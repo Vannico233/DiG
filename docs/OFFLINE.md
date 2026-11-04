@@ -118,7 +118,11 @@ DIG_PYPI_MIRROR=auto DIG_DOWNLOAD_TRANSPORT=curl bash scripts/prepare_cpu_online
 
 ### 模型下载中断（第 3 步）
 
-默认 `DIG_MODEL_TRANSPORT=curl`：先从官方模型 API 读取已锁定 revision 下各个 `.safetensors` 的文件大小和 SHA256，保存到 `assets/model/.dig-downloads/`，再逐个下载权重。中途断线或 Ctrl+C 时，固定命名的 `.partial` 会保留；重跑会从其实际字节数继续。每次重试重新访问锁定 revision 的 Hub 地址，避免持久保存会过期的 CDN 签名地址。下载完成后，文件大小和 SHA256 都通过才会放入模型目录。
+默认 `DIG_MODEL_TRANSPORT=curl`：先从官方模型 API 读取已锁定 revision 下各个 `.safetensors` 的文件大小和 SHA256，保存到 `assets/model/.dig-downloads/`。每片权重使用 8 MiB 分段、最多 4 条连接下载。已有连续 `.partial` 前缀保留不动，之后的分段写入对应 `.chunks`，按顺序合并；重跑会复用二者。只有整个文件大小与官方 SHA256 都通过才会放入模型目录。
+
+`DIG_MODEL_SOURCE=auto` 是默认来源选择：在执行脚本的服务器上并行测试官方来源（继承代理）、HF-Mirror 直连，以及已验证内容一致的魔搭直连/现有代理线路。每个探测最多 15 秒、2 MiB；只有最终 HTTP 206、Content-Range 和总大小符合请求的来源才参与选择。魔搭映射限定为本项目锁定的 Qwen3.5-4B revision 和两个已核对 SHA256 的权重，不推断其他版本相同。可显式指定 `official`、`hf-mirror`、`modelscope` 或 `modelscope-proxy`。镜像直连请求不会修改系统或终端的代理设置。
+
+每段请求最多 90 秒，断流或超时后会保留已验证响应范围内的有效字节并切换下一个可用来源。重试上限统计**连续没有新字节**的请求（至少 12 次），有进度就重置；不会因为整个大文件累计断流四次而停止。忽略 Range、范围错误或错误页面不会追加到旧文件。每 10 秒报告保存量和正在接收的字节。可用 `DIG_MODEL_CONNECTIONS=1..8` 调整连接数；并行不保证突破平台或线路的总带宽限制。
 
 ```bash
 git pull --ff-only
@@ -127,7 +131,21 @@ DIG_MODEL_TRANSPORT=curl DIG_PYPI_MIRROR=auto DIG_DOWNLOAD_TRANSPORT=curl bash s
 
 已完成的模型权重会核对 SHA256 后复用。配置、词表等小文件仍通过 Hub 下载；后续 Hub 快照明确排除权重，不会再次用 Xet 下载同一组大文件。数据集下载保持原流程。
 
-该模式针对当前公开、非 gated 的 Qwen 模型，继承终端代理和项目 CA，不关闭证书检查，不改变模型版本。服务端拒绝续传、返回 403 或校验失败时停止并保留部分文件。只运行一个准备进程；不要删除 `.runtime`、`assets` 或 `.dig-downloads`。
+该模式针对当前公开、非 gated 的 Qwen 模型，使用项目 CA，不关闭证书检查，不改变模型版本。候选来源均无有效进度或文件校验失败时停止并保留文件。准备脚本和模型下载均有进程锁，避免两个写入者互相覆盖；不要删除 `.runtime`、`assets` 或 `.dig-downloads`。离线准备记录不包含可变的下载缓存和锁文件。
+
+如果已安装完第 2 步、在第 3 步失败，可直接后台恢复并自动继续第 4～6 步：
+
+```bash
+git pull --ff-only
+bash scripts/resume_cpu_online.sh
+tail -f .runtime/prepare-resume.log
+```
+
+恢复脚本检查现有 Python/PyTorch 环境，跳过已完成的软件包安装，启用自动模型选源和并行下载，使用 `nohup` 保持进程运行，日志按启动时间保留。`tail` 中 Ctrl+C 只停止查看日志，不停止后台安装；关闭网页终端通常不会中断 `nohup` 作业，但平台关闭实例或回收进程仍会停止。成功标准仍是日志末尾的 `CPU_READY` 和 `.runtime/CPU_READY.json`，仅显示“已启动”不代表配置完成。
+
+前台恢复可用 `DIG_START_STEP=3 bash scripts/prepare_cpu_online.sh`。一般新环境仍执行完整准备脚本。HF 小文件和数据集默认禁用 Xet，使用普通 HTTP 下载；它们的网络重试次数可用 `DIG_NETWORK_ATTEMPTS` 配置，默认 12。
+
+服务器访问下载源仍很慢时，可在网络较快的电脑下载相同权重，通过平台文件上传入口送到项目的 `.runtime/model-incoming/`。先在服务器核对文件大小和官方 SHA256，再放入 `assets/model/`；恢复准备会校验并复用完整权重。不要把尚未完成的上传文件当成模型，也不要用其他量化版或不同 revision 替代。先传一个小样本验证上传链路，避免把瓶颈从下载换成上传。
 
 如果日志出现 `File reconstruction error: CAS Client Error ... error decoding response body`，说明当次仍走 Hub/Xet。旧下载器可能已清理未完成的临时文件，不能承诺找回日志里显示的所有下载字节；也不能把 Xet 重建的临时文件当作连续前缀直接接到 curl 文件上。新模式的持久续传从它自己保存的 `.partial` 开始。
 

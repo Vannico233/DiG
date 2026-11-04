@@ -343,7 +343,8 @@ def local_assets():
             if not list(handle.keys()):
                 raise RuntimeError("Empty model shard: " + name)
     cfg = Config.load(ROOT / "configs/qwen35_4b.json")
-    files = [p for p in model.rglob("*") if p.is_file() and ".cache" not in p.relative_to(model).parts]
+    files = [p for p in model.rglob("*") if p.is_file()
+             and not {".cache", ".dig-downloads"}.intersection(p.relative_to(model).parts)]
     for name in ("gsm8k", "math_numeric"):
         directory = ROOT / "assets/data" / name
         manifest = verify_data(directory, cfg, identity)

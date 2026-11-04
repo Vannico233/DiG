@@ -3,6 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 DIG_ROOT="$(pwd -P)"
+case "${DIG_START_STEP:-1}" in
+  1) ;;
+  3) [[ -x .runtime/py311/bin/python ]] || { printf '%s\n' 'Step 3 requires the existing project Python environment.' >&2; exit 1; } ;;
+  *) printf '%s\n' 'DIG_START_STEP must be 1 or 3.' >&2; exit 1 ;;
+esac
 if [[ "$(uname -s)" != Linux || "$(uname -m)" != x86_64 ]]; then
   printf '%s\n' 'This installer requires Linux x86_64 (the server CPU space).' >&2
   exit 1
@@ -11,6 +16,10 @@ if [[ "$DIG_ROOT" == *" "* ]]; then
   printf '%s\n' 'Use a shared repository path without spaces for the compiler environment.' >&2
   exit 1
 fi
+mkdir -p .runtime
+exec 9>.runtime/prepare.lock
+flock -n 9 || { printf '%s\n' 'Another CPU preparation is already running.' >&2; exit 1; }
+trap 'dig_exit=$?; if (( dig_exit != 0 )); then printf "CPU preparation stopped (exit %s); downloaded progress is retained.\n" "$dig_exit" >&2; fi' EXIT
 export PYTHONNOUSERSITE=1
 unset PYTHONHOME PYTHONPATH
 # Allow re-running after a previous offline activation in the same terminal.
@@ -18,6 +27,8 @@ unset PIP_NO_INDEX HF_HUB_OFFLINE HF_DATASETS_OFFLINE TRANSFORMERS_OFFLINE
 export PIP_DISABLE_PIP_VERSION_CHECK=1
 source "$DIG_ROOT/scripts/local_paths.sh"
 export HF_HUB_DISABLE_TELEMETRY=1
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT:-60}"
 export TOKENIZERS_PARALLELISM=false
 export USE_HUB_KERNELS=NO
 # An interrupted or changed preparation must never leave an old success marker.
@@ -49,6 +60,7 @@ if [[ ! -x "$CC" || ! -x "$CXX" ]]; then
     -p "$DIG_PREFIX" python=3.11 c-compiler cxx-compiler
 fi
 
+if [[ "${DIG_START_STEP:-1}" == 1 ]]; then
 printf '%s\n' '[2/6] Installing CUDA 12.8 PyTorch wheels (a GPU is NOT needed here).'
 # Probe on this host, after its Python and trusted certificates are available.
 if [[ "${DIG_PYPI_MIRROR:-official}" == auto ]]; then
@@ -71,9 +83,14 @@ fi
 "$DIG_PYTHON" -m pip install --upgrade pip setuptools wheel packaging ninja
 "$DIG_PYTHON" scripts/torch_wheels.py
 "$DIG_PYTHON" -m pip install -c requirements/h200-constraints.txt -e '.[server,test]'
+else
+  printf '%s\n' '[2/6] Reusing installed dependencies; checking before resuming step 3.'
+  "$DIG_PYTHON" -c 'import torch, transformers, datasets, huggingface_hub, dig_rl; assert torch.__version__.split("+")[0] == "2.10.0" and torch.version.cuda == "12.8", "Run full preparation to repair dependencies"'
+  "$DIG_PYTHON" -m pip check
+fi
 
 printf '%s\n' '[3/6] Downloading Qwen3.5-4B, GSM8K and MATH numeric; preparing fixed data splits.'
-"$DIG_PYTHON" -m dig_rl.prepare --assets assets --config configs/qwen35_4b.json
+"$DIG_PYTHON" -m dig_rl.prepare --assets assets --config configs/qwen35_4b.json --network-attempts "${DIG_NETWORK_ATTEMPTS:-12}"
 
 printf '%s\n' '[4/6] Installing FLA and the official prebuilt causal-conv1d wheel; no nvcc build.'
 "$DIG_PYTHON" scripts/offline_setup.py causal-wheel
