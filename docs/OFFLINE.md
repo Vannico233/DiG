@@ -50,7 +50,8 @@ CPU_READY: all shared files are prepared.
 ```
 
 并存在 `.runtime/CPU_READY.json`。**下载报错或脚本中途退出，不算准备完成。**
-可在 CPU 区重新运行同一条命令；HF 会复用锁定版本和缓存，已安装的软件包通常不会重新下载。
+可在 CPU 区重新运行同一条命令；锁定版本及已完成的缓存文件会复用，已安装的软件包通常不会重新下载。
+第 3 步现在默认使用持久 curl 下载模型权重，详见下方“模型下载中断”。旧 Hub/Xet 流程的未完成模型分片不保证可以跨进程续传。
 固定摘要的大包下载会保留 `.partial` 文件；重跑时，如果服务器支持 HTTP Range，就从保存位置续传。
 所有固定摘要文件必须校验通过后才能安装；默认 urllib 方式遇到服务端忽略续传时，会提示并从头下载当前文件。可选 curl 方式遇到拒绝续传时则停止并保留进度。
 不要在 GPU 训练同时修改这个共享环境或重新执行准备脚本。
@@ -68,7 +69,7 @@ CPU_READY: all shared files are prepared.
 保留 `.runtime` 和 `assets`；不要同时开第二个安装进程。
 
 升级前的 pip 缓存中，已完整下载且摘要匹配的 wheel 会尝试复用；旧 pip 临时下载中未完成的部分不保证能接续。
-新版持久续传针对固定摘要的 Torch/CUDA/causal-conv1d 文件；一般小型 Python 依赖仍由 pip 下载，模型由 HF 缓存管理。
+安装包的持久续传针对固定摘要的 Torch/CUDA/causal-conv1d 文件；一般小型 Python 依赖仍由 pip 下载。模型权重使用独立的持久 curl 流程，小文件和数据集仍由 HF 管理。
 已有完整的 `.runtime/wheels/torch-downloads.json` 时，新版会核对包版本、平台和清单完整性，直接复用清单，不再查询 PyPI 元数据。
 首次查询的每个包信息会单独缓存，遇到短响应、断线或暂时性 HTTP 错误会重试。元数据查询失败不会删除或修改已保存的 wheel `.partial` 文件。
 单独查看固定包下载计划（只读取元数据）可用：
@@ -114,6 +115,23 @@ DIG_PYPI_MIRROR=auto DIG_DOWNLOAD_TRANSPORT=curl bash scripts/prepare_cpu_online
 短测只能反映当时的访问和速度，不保证整个文件持续同速，也不证明所有后续包都可访问；再次报错时可重跑自动检测。
 单独检测而不安装可执行 `SSL_CERT_FILE="$PWD/.runtime/certs/ca-bundle.pem" .runtime/py311/bin/python scripts/pypi_routes.py`。
 中科大在缓存未命中时可能重定向到清华，因此它们不一定是两条独立可用的下载路径；自动检测会跟随重定向检查最终响应。
+
+### 模型下载中断（第 3 步）
+
+默认 `DIG_MODEL_TRANSPORT=curl`：先从官方模型 API 读取已锁定 revision 下各个 `.safetensors` 的文件大小和 SHA256，保存到 `assets/model/.dig-downloads/`，再逐个下载权重。中途断线或 Ctrl+C 时，固定命名的 `.partial` 会保留；重跑会从其实际字节数继续。每次重试重新访问锁定 revision 的 Hub 地址，避免持久保存会过期的 CDN 签名地址。下载完成后，文件大小和 SHA256 都通过才会放入模型目录。
+
+```bash
+git pull --ff-only
+DIG_MODEL_TRANSPORT=curl DIG_PYPI_MIRROR=auto DIG_DOWNLOAD_TRANSPORT=curl bash scripts/prepare_cpu_online.sh
+```
+
+已完成的模型权重会核对 SHA256 后复用。配置、词表等小文件仍通过 Hub 下载；后续 Hub 快照明确排除权重，不会再次用 Xet 下载同一组大文件。数据集下载保持原流程。
+
+该模式针对当前公开、非 gated 的 Qwen 模型，继承终端代理和项目 CA，不关闭证书检查，不改变模型版本。服务端拒绝续传、返回 403 或校验失败时停止并保留部分文件。只运行一个准备进程；不要删除 `.runtime`、`assets` 或 `.dig-downloads`。
+
+如果日志出现 `File reconstruction error: CAS Client Error ... error decoding response body`，说明当次仍走 Hub/Xet。旧下载器可能已清理未完成的临时文件，不能承诺找回日志里显示的所有下载字节；也不能把 Xet 重建的临时文件当作连续前缀直接接到 curl 文件上。新模式的持久续传从它自己保存的 `.partial` 开始。
+
+`DIG_MODEL_TRANSPORT=hub` 可显式回到旧快照方式。仅设置 `DIG_DOWNLOAD_TRANSPORT=curl` 不控制模型下载；模型选项是独立的。新方式避免 Xet 重建错误并保留下载进度，但不保证代理到 Hugging Face 的线路一定提速。
 
 ## 2. 进入 GPU 离线区
 

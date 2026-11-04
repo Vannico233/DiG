@@ -2,11 +2,13 @@
 import argparse
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 from .config import Config
 from .data import normalize, split_rows
 from .io import sha256, write_json, write_jsonl
 from .hf_downloads import hf_retry, resolve_revisions
+from .model_downloads import download_model_snapshot
 from .runtime import prompt_ids, demo_ids
 
 
@@ -18,11 +20,13 @@ def main():
     p.add_argument("--gsm8k-revision", default="main")
     p.add_argument("--math-revision", default="main")
     p.add_argument("--network-attempts", type=int, default=4)
+    p.add_argument("--model-transport", choices=("curl", "hub"),
+                   default=os.environ.get("DIG_MODEL_TRANSPORT", "curl"))
     p.add_argument("--metadata-only", action="store_true", help="Resolve/save repository revisions without downloading model weights")
     args = p.parse_args()
     if args.network_attempts < 1:
         p.error("--network-attempts must be positive")
-    from huggingface_hub import HfApi, snapshot_download
+    from huggingface_hub import HfApi
     from transformers import AutoProcessor
     from datasets import load_dataset
     cfg, api = Config.load(args.config), HfApi()
@@ -36,9 +40,8 @@ def main():
         print("Repository revisions saved. Model weights were not downloaded.", flush=True)
         return
     model_dir = args.assets / "model"
-    hf_retry("Downloading pinned model snapshot", lambda: snapshot_download(
-        requested["model"][0], revision=lock["resolved"]["model"], local_dir=model_dir,
-        allow_patterns=["*.json", "*.safetensors", "*.model", "*.txt", "*.jinja", "*.tiktoken"]), args.network_attempts)
+    download_model_snapshot(api, requested["model"][0], lock["resolved"]["model"],
+                            model_dir, args.network_attempts, args.model_transport)
     write_json(model_dir / "dig_model.json", {"repo": requested["model"][0], "revision": lock["resolved"]["model"]})
     processor = AutoProcessor.from_pretrained(model_dir, local_files_only=True)
     for name, subset in (("gsm8k", "main"), ("math_numeric", "numeric")):
