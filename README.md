@@ -97,7 +97,12 @@ GSM8K/Geo3K/ScienceQA 输出上限 4096，MATH 为 8192；损失固定除以 204
 GPU 0/1/2/3 分别处理 GSM8K/MATH/Geo3K/ScienceQA，每卡有 RLOO 和 DiG 两个候选 worker。
 先比较单 worker 与双 worker 的每卡总吞吐，再选择每卡 1 或 2 个并发。
 双 worker 总吞吐至少提高 15%、两者峰值 reserved 显存之和小于 64 GiB 时采用双任务。
-512-token 测速并不保证长序列显存，OOM 会停止当前阶段并保留 checkpoint。
+流水线先用最长校准输入和完整回答上限执行一次真实反向检查（MATH 8192 tokens），不更新参数。
+双 worker 还要求单 worker 长序列反向峰值的两倍小于 64 GiB；
+这仍不是所有输入和并发情况的显存保证，OOM 会停止当前阶段并保留 checkpoint。
+反向计算将词表投影和交叉熵一起按 64 tokens 重计算；
+H100 + FLA 0.6.0 + Triton 3.6.0 的 L2Norm 前后向使用已有 BT=32 / 4-warps 配置，
+避免在长序列反向图仍存活时试跑 25 个调优候选。数学目标、长度、G、学习率不变。
 校准阶段每卡单 worker，训练阶段再使用选出的并发；已有外部 GPU 进程会阻止启动。
 
 CPU 页面执行（先同步 Git）：
@@ -132,6 +137,17 @@ tail -n 30 .runtime/round2.log
 相同版本恢复使用同一启动命令；协议或代码改变必须使用新目录。
 快速验证是训练集内留出的 64 道题、每题一次 greedy，不读取官方 test。
 完整官方测试和三种子扩展应在 pilot 配置冻结后另行执行。
+
+从 `491a0d6` 的校准 OOM 恢复：在 CPU 同步代码、激活环境后先执行
+`python scripts/offline_setup.py seal`，再执行：
+
+```bash
+python scripts/round2.py migrate --resume-from runs/round2_20261105 --output runs/round2_20261106_memfix
+```
+
+迁移仅接受已核对版本和相同依赖/数据/模型、尚未训练的运行；复制完整校准记录到新目录，
+保留旧目录和来源哈希，不复用旧测速或评估。校准时间混合修复前后实现，不能据此声称加速。
+GPU 用 `bash scripts/start_round2.sh runs/round2_20261106_memfix` 启动；先做全长度检查再续跑。
 
 这一轮明确是固定 rho=0.5 的探索比较，校准不等于独立审计通过；
 AdamW 不沿用 SGD 的效率保证；a=0 标记为 `dig_zero_predictor`。

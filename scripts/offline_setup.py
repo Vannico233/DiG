@@ -393,8 +393,11 @@ def validate_ready(saved, root, prefix, packages, files):
 def readiness(seal=False, gpu=False):
     # Set offline mode before any Hugging Face/Transformers import, even when sealing on CPU.
     os.environ.update(HF_HUB_OFFLINE="1", HF_DATASETS_OFFLINE="1", USE_HUB_KERNELS="NO")
+    print("Checking PyTorch runtime...", flush=True)
     torch = check_runtime()
+    print("Checking installed package versions...", flush=True)
     packages = installed_packages()
+    print("Checking C/CUDA compiler and TileLang...", flush=True)
     check_compiler()
     print("Verifying local assets (including weight-file hashes)...", flush=True)
     files = local_assets()

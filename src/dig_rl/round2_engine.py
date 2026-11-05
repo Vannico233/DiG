@@ -61,12 +61,25 @@ def visual_completion_logprobs(model, sequence, prompt_length, media):
         types = media["mm_token_type_ids"]
         # Answers are text, but the prompt's image locations must be retained.
         media["mm_token_type_ids"] = F.pad(types, (0, sequence.shape[1]-1-types.shape[1]), value=0)
-    output = model(input_ids=sequence[:, :-1], attention_mask=torch.ones_like(sequence[:, :-1]),
-                   **media, use_cache=False)
-    logits, targets = output.logits[:, prompt_length - 1:], sequence[:, prompt_length:]
-    def score(x, y):
-        return -F.cross_entropy(x.float().reshape(-1, x.shape[-1]), y.reshape(-1), reduction="none")
-    return torch.cat([checkpoint(score, logits[:, j:j+64], targets[:, j:j+64], use_reentrant=False)
+    base = model.get_base_model() if hasattr(model, "get_base_model") else model
+    kwargs = dict(input_ids=sequence[:, :-1], attention_mask=torch.ones_like(sequence[:, :-1]),
+                  **media, use_cache=False)
+    # Checkpoint the vocabulary projection together with CE, not just CE after
+    # allocating the full [sequence, vocabulary] logits and their gradients.
+    if hasattr(base, "lm_head") and hasattr(base, "model"):
+        if getattr(base.config, "model_type", None) != "qwen3_5":
+            raise ValueError("Chunked visual scoring requires the validated Qwen3.5 architecture")
+        values = base.model(**kwargs).last_hidden_state[:, prompt_length - 1:]
+        def score(x, y):
+            logits = base.lm_head(x).float()
+            return -F.cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="none")
+    else:
+        # Small generic test models retain the public logits interface.
+        values = model(**kwargs).logits[:, prompt_length - 1:]
+        def score(x, y):
+            return -F.cross_entropy(x.float().reshape(-1, x.shape[-1]), y.reshape(-1), reduction="none")
+    targets = sequence[:, prompt_length:]
+    return torch.cat([checkpoint(score, values[:, j:j+64], targets[:, j:j+64], use_reentrant=False)
                       for j in range(0, targets.shape[1], 64)])
 
 
@@ -76,8 +89,41 @@ class BatchedEngine(Engine):
             group_size=protocol.group_size, rollout_batch_size=protocol.group_size,
             candidates=protocol.candidates, seed=protocol.seed, learning_rate=protocol.learning_rate)
         super().__init__(model_dir, cfg)
+        from .hopper import configure_round2_kernels
+        self.kernel_policy = configure_round2_kernels()
+        print("Round-two kernel policy: " + self.kernel_policy, flush=True)
         self.protocol, self.data_root, self.input_cache = protocol, data_root, OrderedDict()
         self.tokenizer.padding_side = "left"
+
+    def memory_check(self, rows):
+        """One real full-length backward, with a synthetic answer, before setup.
+
+        Uses the longest calibration input. Does not update weights or contribute
+        any reward/gradient statistics to the experiment.
+        """
+        row = max(rows, key=lambda r: self.encoded(r)["input_ids"].shape[1])
+        prompt = self.encoded(row)["input_ids"]
+        token = next((int(x) for x in demo_ids(self.tokenizer, row["demo"])[0]
+                      if int(x) not in self.eos_ids), None)
+        if token is None:
+            raise ValueError("No ordinary token for the memory check")
+        completion = torch.full((1, self.protocol.max_new_tokens), token, dtype=prompt.dtype)
+        sequence = torch.cat([prompt, completion], dim=1).to(self.device)
+        self.zero_grad(); self.model.train(); torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(); self.sync(); start = time.monotonic()
+        loss = -visual_completion_logprobs(self.model, sequence, prompt.shape[1], self.media(row)).sum()
+        (loss / self.protocol.loss_normalizer).backward()
+        self.sync()
+        gradients = [p.grad for _, p in self.params if p.grad is not None]
+        if not gradients or not all(torch.isfinite(g).all() for g in gradients):
+            raise FloatingPointError("Full-length memory check produced missing/nonfinite gradients")
+        report = dict(passed=True, row_id=row["id"], prompt_tokens=prompt.shape[1],
+            completion_tokens=completion.numel(), seconds=time.monotonic()-start,
+            peak_allocated_gib=torch.cuda.max_memory_allocated()/2**30,
+            peak_reserved_gib=torch.cuda.max_memory_reserved()/2**30,
+            kernel_policy=self.kernel_policy, note="Synthetic full-length backward; no parameter update")
+        self.zero_grad()
+        return report
 
     def encoded(self, row):
         if row["id"] in self.input_cache:
@@ -186,5 +232,6 @@ class BatchedEngine(Engine):
                 raise FloatingPointError("Nonfinite policy loss")
             (loss * weight).backward()
             total += float(loss.detach()); tokens += logp.numel()
+            del loss, logp
         self.sync()
         return dict(loss=total, seconds=time.monotonic()-start, scored_tokens=tokens)

@@ -95,7 +95,13 @@ def worker(args):
     engine = BatchedEngine(m["model"], cfg, data)
     identity = dict(manifest=object_hash(m), config=cfg.fingerprint())
     try:
-        if args.phase.startswith("profile"):
+        if args.phase == "memorycheck":
+            rows = read_rows(data / "calibration.jsonl")[:cfg.calibration_size]
+            update("checking_full_length_backward", completion_tokens=cfg.max_new_tokens)
+            report = engine.memory_check(rows)
+            write_json(args.output / "memorycheck" / (job["dataset"]+".json"), report)
+            print(json.dumps(report), flush=True)
+        elif args.phase.startswith("profile"):
             mode = int(args.phase[-1])
             rows = read_rows(data / "train.jsonl")[:4]
             engine.rollout_many([(rows[0], cfg.seed)], count=2, max_tokens=32)
@@ -134,10 +140,12 @@ def worker(args):
             for j in range(len(saved), len(rows)):
                 update("calibrating", completed=j, total=len(rows))
                 start = time.monotonic()
-                record, _ = measured(engine, rows[j], cfg.seed+10007*j, 0.)
+                record, _ = measured(engine, rows[j], cfg.seed+10007*j, 0.,
+                    progress=lambda part: update("calibrating", completed=j, total=len(rows), part=part))
                 record["wall_seconds"] = time.monotonic()-start
                 append_json(directory / "calibration.jsonl", record)
                 saved.append(record)
+                update("calibrating", completed=j+1, total=len(rows), part="question_saved")
             write_json(directory / "calibration.json", dict(a=fit_scale(saved), identity=identity,
                 seconds=sum(r["wall_seconds"] for r in saved), generated_tokens=sum(r["generated_tokens"] for r in saved),
                 status="calibrated_only_not_a_passed_audit", questions=len(saved)))
@@ -167,11 +175,16 @@ def profile_decision(output, m):
         single = one["generated_tokens"] / one["seconds"]
         duration = max(r["finished"] for r in two)-min(r["started"] for r in two)
         double = sum(r["generated_tokens"] for r in two)/duration
-        fit = sum(r["peak_reserved_gib"] for r in two) < 64
+        memory = read(output / "memorycheck" / (dataset+".json"))
+        if not memory["passed"]:
+            raise RuntimeError("Full-length backward has not passed: " + dataset)
+        projected = max(sum(r["peak_reserved_gib"] for r in two), 2*memory["peak_reserved_gib"])
+        fit = projected < 64
         decisions[dataset] = dict(slots=2 if fit and double >= 1.15*single else 1,
             single_tokens_per_second=single, dual_tokens_per_second=double,
             active_sequences=one["active_sequences"], peak_reserved_sum_gib=sum(r["peak_reserved_gib"] for r in two),
-            note="512-token screening; full-length OOM still fails loudly. This is not an algorithm speedup measurement.")
+            full_length_backward_peak_gib=memory["peak_reserved_gib"], projected_pair_gib=projected,
+            note="Throughput screening plus full-length single-worker backward. Not a proof of worst-case paired memory or algorithm speedup.")
     write_json(output / "profile_decision.json", decisions)
     print(json.dumps(decisions, indent=2), flush=True)
 
@@ -210,7 +223,11 @@ def launch(output, phase, m, slots):
                     if rc is not None:
                         active.remove((job, proc))
                         if rc:
-                            raise RuntimeError(job["name"]+" failed; inspect its log. Checkpoints retained.")
+                            label = job["name"]+("_"+phase if phase != "train" else "")
+                            state_path = output / ("progress_"+label+".json")
+                            detail = read(state_path).get("error", "See worker log") if state_path.exists() else "See worker log"
+                            raise RuntimeError(f"{job['name']} failed (exit {rc}): {detail}; "
+                                f"log: {output / (label+'.log')}. Saved progress retained.")
                 if active:
                     status(output)
                     gpu = subprocess.run(["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used,power.draw",
@@ -277,6 +294,7 @@ def summarize(output):
                                     paired_prompt_bootstrap_95=np.quantile(means,[.025,.975]).tolist())
     write_json(output / "results.json", dict(results=result, comparisons=comparisons,
         phase_timing=records(output / "phase_timing.jsonl"),
+        recovery=m.get("recovery"),
         note="Single-seed validation pilot. Co-resident worker wall time is not exclusive GPU-hours; no isolated speedup claim."))
     print(json.dumps(result, indent=2), flush=True)
 
@@ -284,7 +302,8 @@ def summarize(output):
 def main():
     os.chdir(ROOT)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "plan", "profile", "calibrate", "run", "pipeline", "status", "summarize", "worker"))
+    parser.add_argument("command", choices=("prepare", "plan", "migrate", "memorycheck", "profile", "calibrate", "run", "pipeline", "status", "summarize", "worker"))
+    parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--output", type=Path, default=Path("runs/round2_20261105"))
     parser.add_argument("--assets", type=Path, default=Path("assets/round2"))
     parser.add_argument("--model", type=Path, default=Path("assets/model"))
@@ -296,7 +315,7 @@ def main():
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--optimizer", choices=("adamw", "sgd"), default="adamw")
     parser.add_argument("--learning-rate", type=float, default=None, help="Default AdamW=1e-6; SGD=0.01")
-    parser.add_argument("--phase", choices=("profile1", "profile2", "calibrate", "train"))
+    parser.add_argument("--phase", choices=("memorycheck", "profile1", "profile2", "calibrate", "train"))
     parser.add_argument("--job")
     args = parser.parse_args()
     args.output = args.output.resolve()
@@ -307,6 +326,11 @@ def main():
         prepare(args.assets, args.model)
     elif args.command == "plan":
         plan(args)
+    elif args.command == "migrate":
+        from dig_rl.round2_recovery import migrate
+        if args.resume_from is None:
+            parser.error("migrate requires --resume-from")
+        migrate(args.resume_from, args.output, runtime_identity())
     elif args.command == "status":
         status(args.output)
     elif args.command == "summarize":
@@ -328,6 +352,7 @@ def main():
             m = validate(args.output)
             write_json(args.output / "status.json", dict(state="running", command=args.command, pid=os.getpid(), utc=now()))
             try:
+                launch(args.output, "memorycheck", m, {d:1 for d in DATASETS})
                 if args.command == "profile" or (args.command == "pipeline" and not (args.output / "profile_decision.json").exists()):
                     launch(args.output, "profile1", m, {d:1 for d in DATASETS})
                     launch(args.output, "profile2", m, {d:2 for d in DATASETS})

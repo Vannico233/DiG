@@ -190,7 +190,7 @@ def test_cheap_evaluation_is_resumable_and_protocol_bound(tmp_path):
         evaluate(Engine(),ROWS,cfg,tmp_path,{'changed':1},lambda *a,**k:None)
 
 
-def test_tiny_qwen_visual_batch_generation_matches_image_scoring():
+def tiny_visual_model():
     transformers = pytest.importorskip('transformers')
     peft = pytest.importorskip('peft')
     torch.manual_seed(3)
@@ -214,6 +214,12 @@ def test_tiny_qwen_visual_batch_generation_matches_image_scoring():
         types=torch.zeros_like(ids); types[0,2]=1
         items.append(dict(input_ids=ids,attention_mask=torch.ones_like(ids),
                           mm_token_type_ids=types,pixel_values=torch.randn(4,24),image_grid_thw=torch.tensor([[1,2,2]])))
+    return model, items
+
+
+def test_tiny_qwen_visual_batch_generation_matches_image_scoring():
+    import transformers
+    model, items = tiny_visual_model()
     batch=pack_inputs(items,0)
     model.eval()
     with torch.no_grad():
@@ -234,6 +240,37 @@ def test_tiny_qwen_visual_batch_generation_matches_image_scoring():
     assert sum(float(g.abs().sum()) for g in grads)>0
 
 
+@pytest.mark.parametrize('visual',[False,True])
+def test_chunked_vocabulary_projection_preserves_all_adapter_gradients(visual):
+    model, items = tiny_visual_model()
+    model.train()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant':False})
+    model.enable_input_require_grads()
+    item = items[0] if visual else dict(input_ids=torch.tensor([[1,5,6]]))
+    prompt = item['input_ids'].shape[1]
+    sequence = torch.cat([item['input_ids'],torch.tensor([[5,6]*70])],dim=1)
+    media={k:v for k,v in item.items() if k not in ('input_ids','attention_mask')}
+    widths=[]
+    hook=model.get_base_model().lm_head.register_forward_pre_hook(lambda m,a:widths.append(a[0].shape[1]))
+    actual=visual_completion_logprobs(model,sequence,prompt,media)
+    # Include a negative DiG coefficient and fixed loss scaling.
+    (actual.sum() * -.3/2048).backward()
+    actual_grads={n:p.grad.clone() for n,p in model.named_parameters() if p.grad is not None}
+    hook.remove()
+    assert max(widths)<=64 and len(widths)>2
+    model.zero_grad(set_to_none=True)
+    kwargs=dict(media)
+    if 'mm_token_type_ids' in kwargs:
+        kwargs['mm_token_type_ids']=torch.nn.functional.pad(kwargs['mm_token_type_ids'],(0,sequence.shape[1]-1-prompt))
+    logits=model(input_ids=sequence[:,:-1],attention_mask=torch.ones_like(sequence[:,:-1]),**kwargs,use_cache=False).logits[:,prompt-1:]
+    expected=-torch.nn.functional.cross_entropy(logits.float().reshape(-1,logits.shape[-1]),sequence[:,prompt:].reshape(-1),reduction='none')
+    (expected.sum() * -.3/2048).backward()
+    torch.testing.assert_close(actual,expected,atol=2e-5,rtol=2e-5)
+    for n,p in model.named_parameters():
+        if n in actual_grads:
+            torch.testing.assert_close(actual_grads[n],p.grad,atol=2e-6,rtol=2e-4)
+
+
 def test_partial_jsonl_tail_is_repaired_only_by_writer(tmp_path):
     from dig_rl.round2_train import records
     p=tmp_path/'records.jsonl'
@@ -250,6 +287,7 @@ def test_scheduler_profile_decision_uses_aggregate_work_and_memory(tmp_path):
     runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
     from dig_rl.io import write_json
     for dataset in DATASETS:
+        write_json(tmp_path/'memorycheck'/f'{dataset}.json',dict(passed=True,peak_reserved_gib=35 if dataset=='math' else 10))
         write_json(tmp_path/'profile/profile1'/f'{dataset}_rloo.json',dict(generated_tokens=1000,seconds=10,active_sequences=16))
         for arm in ('rloo','dig'):
             memory=40 if dataset=='math' else 20

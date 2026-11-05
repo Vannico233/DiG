@@ -72,15 +72,19 @@ def decide(records, tau, tau_loo, overhead, cfg):
                 reason="positive held-out cost margin" if best else "insufficient held-out evidence; use full RLOO")
 
 
-def measured(engine, row, seed, a):
+def measured(engine, row, seed, a, progress=None):
+    report = progress or (lambda stage: None)
+    report("demo_backward")
     engine.zero_grad()
     demo = engine.demo_backward(row)
     u = engine.gradient()
     gs, times, responses, tokens = [], [], 0, 0
     scored_tokens = demo["scored_tokens"]
     for j in range(2):
+        report("rollout_"+str(j+1))
         sequences, rewards, gen = engine.rollout(row, seed + j * 1000003)
         engine.zero_grad()
+        report("rl_backward_"+str(j+1))
         score = engine.rl_backward(row, sequences, rewards)
         gs.append(engine.gradient())
         scored_tokens += score["scored_tokens"]
