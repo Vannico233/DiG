@@ -18,7 +18,7 @@ SGD、无动量、无权重衰减、无梯度裁剪；学习率 `eta0 / sqrt(ste
 
 - Qwen/Qwen3.5-4B，BF16 基座、FP32 LoRA；只在语言模型线性层添加 LoRA。
 - GSM8K 和 MATH numeric；使用数据集标准解答作为单条示范。
-- 两张 H200（每卡约 140GB）：训练时 GPU 0 跑完整 RLOO，GPU 1 跑 DiG；两套独立模型，不做 DDP。
+- 当前四张 H100（每卡 80GB）使用独立工作进程，四组探索对照见 [四卡实验指南](docs/EXPLORATORY.md)。原双 H200 启动器仍保留，不做 DDP。
 - 原始策略采样：temperature=1、top_p=1、top_k=0、thinking=false；固定 boxed 数值奖励。
 - 默认 H=2048、G=4、B=8、LoRA r=16/alpha=32；初始 SGD lr=0.01 **只是待验证的 pilot 设置，不是已调优结论**。
 - 32 题校准、96 题独立审计、256 题验证，其余合格训练题用于训练；原始 test 单独保留。
@@ -48,6 +48,11 @@ python -m dig_rl.summarize --run runs/pilot01
 新环境放在 `.runtime/py311/`，不会修改 `/etc/inspire`；两区须使用相同的绝对路径。
 GPU 也能联网的独立机器使用 [双 H200 运行指南](docs/SERVER.md) 的在线安装流程。
 没有 GPU 的本地验证：`pip install -e '.[test]' && python -m pytest -q`。
+
+已有实验训练收益较弱时，可先运行 [短程训练信号诊断](docs/SIGNAL_DIAGNOSTIC.md)：
+四卡比较两个数据集的两档 SGD 学习率，每组仅四步训练与 32 题验证，复用已有初始模型输出，
+记录逐组奖励差异、生成/反向耗时、显存及 GPU 利用率。代码在本地实现并同步 GitHub，
+CPU 空间同步和准备，GPU 空间由使用者运行；当前实验尚未完成或 GPU 忙碌时拒绝启动新诊断。
 
 ## 审计与回退
 
