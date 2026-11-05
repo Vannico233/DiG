@@ -66,6 +66,40 @@ nohup python -u scripts/run_exploratory.py resume \
 恢复沿用原清单，禁止更换代码、配置和预算。训练从最近断点恢复，评估从已完成题目继续。
 因恢复而退回的训练日志尾部会另存备份。
 
+### 用空闲四卡补齐中断的初始模型评估
+
+如果所有训练和训练后评估已完成，只剩一个数据集的初始模型评估，可使用
+`scripts/finish_base_eval.py`。先在 CPU 空间更新代码，激活共享环境并重新运行
+`python scripts/offline_setup.py seal`。GPU 实例恢复后确认四卡没有其他任务，执行：
+
+```bash
+source scripts/activate_offline.sh
+python scripts/offline_setup.py gpu
+nohup python -u scripts/finish_base_eval.py \
+  --output runs/explore_20261104_rho05 --dataset math_numeric --gpus 0 1 2 3 \
+  >> .runtime/finish_base_eval.log 2>&1 < /dev/null &
+```
+
+这个独立入口保留原 `run_exploratory.py` 及训练 checkpoint；每题仍使用原来的
+全局题号对应种子和四条回答的批次。已有完整题目不再生成，剩余题目分给四卡。
+每完成一题就原子保存独立文件；被中断后重复同一命令，复用已完成的题目。
+启动器持有原实验锁，防止与原 `resume` 同时运行；子进程继承锁，避免父进程被强制结束后重复启动。
+每个进程检查库、核心代码、数据及初始参数身份。所有分片完成后，按原题序合并，保留原前缀备份，
+调用原评估汇总和比较逻辑，生成完整 `results.csv`、`comparisons.json`。
+改变并行调度不承诺不同硬件运行时的逐位确定性；该入口不改变采样分布或评估口径。
+
+监测这个补齐任务（原监测器在合并前仍显示原来的前缀数量）：
+
+```bash
+tail -n 20 .runtime/finish_base_eval.log
+cat runs/explore_20261104_rho05/eval/math_numeric_base/parallel/status.json
+```
+
+分卡日志在同一 `parallel/slot-*.log`，每题结果在 `parallel/parts/`。
+`parallel/status.json` 中的本次墙钟耗时与原评估 `generation_seconds` 分开记录；
+后者是各题生成用时之和，多个 GPU 并行时不能直接视为实际等待时长。
+本入口只补齐初始模型评估，不重新训练，也不启动新实验。
+
 ## 结果
 
 - `experiment.json`：固定配置、四卡分工、原始失败门槛、脚本与审计文件摘要。
