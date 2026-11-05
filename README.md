@@ -84,3 +84,48 @@ F_RL  = c (tau² + nu²)
 - CPU 测试验证代数、梯度路径、数据隔离和恢复流程；**H200 算子、显存、吞吐和真实效果须在服务器预检及实验中确认**。
 
 实现细节见 [算法与审计约定](docs/METHOD.md)。
+
+## 第二轮：批量生成与图文探索实验
+
+新入口为 `scripts/round2.py`，旧入口和结果保留。新数据位于 `assets/round2`：
+GSM8K、MATH 原训练集（测试为 MATH-500）、Geo3K、ScienceQA 图片子集。
+每个数据集使用同配置 RLOO/DiG，默认 G=8、候选题 B=32、同时生成 16 条回答，
+LoRA r16/alpha32、AdamW 1e-6、32 步或每个 worker 两小时先到停止。
+GSM8K/Geo3K/ScienceQA 输出上限 4096，MATH 为 8192；损失固定除以 2048。
+每个回答有独立随机流；DiG 抽样在生成前完成，不补选问题来填满 batch。
+
+GPU 0/1/2/3 分别处理 GSM8K/MATH/Geo3K/ScienceQA，每卡有 RLOO 和 DiG 两个候选 worker。
+先比较单 worker 与双 worker 的每卡总吞吐，再选择每卡 1 或 2 个并发。
+双 worker 总吞吐至少提高 15%、两者峰值 reserved 显存之和小于 64 GiB 时采用双任务。
+512-token 测速并不保证长序列显存，OOM 会停止当前阶段并保留 checkpoint。
+校准阶段每卡单 worker，训练阶段再使用选出的并发；已有外部 GPU 进程会阻止启动。
+
+CPU 页面执行（先同步 Git）：
+
+```bash
+bash scripts/prepare_round2.sh
+```
+
+GPU 页面执行：
+
+```bash
+nohup bash scripts/start_round2.sh runs/round2_20261105 > .runtime/round2.log 2>&1 < /dev/null &
+```
+
+监测与结果（先激活离线环境）：
+
+```bash
+python scripts/round2.py status --output runs/round2_20261105
+python scripts/round2.py summarize --output runs/round2_20261105
+tail -n 30 .runtime/round2.log
+```
+
+运行依次完成测速、新校准、共享 Base 验证、成对训练和最终验证，训练每步保存。
+相同版本恢复使用同一启动命令；协议或代码改变必须使用新目录。
+快速验证是训练集内留出的 64 道题、每题一次 greedy，不读取官方 test。
+完整官方测试和三种子扩展应在 pilot 配置冻结后另行执行。
+
+这一轮明确是固定 rho=0.5 的探索比较，校准不等于独立审计通过；
+AdamW 不沿用 SGD 的效率保证；a=0 标记为 `dig_zero_predictor`。
+Geo3K 使用答案代理，ScienceQA 有解答时使用解答代理，参考答案和解答不进入输入问题。
+同卡两任务的时间不能当成独占 GPU 的算法加速比，正式效率结论仍需独占复测。
