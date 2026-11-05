@@ -164,11 +164,11 @@ def fetch_range(route, start, end, total, output, stop, seconds=90):
     return accepted, elapsed, f"curl={process.returncode} HTTP={status.strip() or 'unknown'}"
 
 
-def rank_routes(routes, item, offset, directory, stop):
+def rank_routes(routes, item, offset, directory, stop, label="Model"):
     if len(routes) == 1:
         return routes
     end = min(item["size"] - 1, offset + 2 * 1024 * 1024 - 1)
-    print("Testing actual weight routes (up to 15 seconds each, in parallel)...", flush=True)
+    print(f"Testing actual {label.lower()} routes (up to 15 seconds each, in parallel)...", flush=True)
     scores = []
     with tempfile.TemporaryDirectory(prefix="probe-", dir=directory) as tmp:
         pool = ThreadPoolExecutor(max_workers=len(routes))
@@ -188,9 +188,9 @@ def rank_routes(routes, item, offset, directory, stop):
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
     if not scores:
-        raise RuntimeError("All model routes failed their Range checks; existing progress retained")
+        raise RuntimeError(f"All {label.lower()} routes failed their Range checks; existing progress retained")
     ranked = [route for _, route in sorted(scores, key=lambda pair: pair[0], reverse=True)]
-    print("Selected weight route: " + ranked[0].name, flush=True)
+    print(f"Selected {label.lower()} route: " + ranked[0].name, flush=True)
     return ranked
 
 
@@ -230,13 +230,13 @@ def fill_chunk(routes, start, end, total, piece, stop, attempts):
     raise InterruptedError("Download paused; chunk progress retained")
 
 
-def download_parallel(routes, path, item, *, workers=4, chunk_size=8 * 1024 * 1024, attempts=12):
+def download_parallel(routes, path, item, *, workers=4, chunk_size=8 * 1024 * 1024, attempts=12, label="Model"):
     if not 1 <= workers <= 8 or chunk_size <= 0 or attempts < 1:
         raise ValueError("Model connections must be 1..8; chunk size and attempts must be positive")
     path = Path(path)
     size, expected = item["size"], item["sha256"]
     if path.is_file() and path.stat().st_size == size and sha256(path) == expected:
-        print("Verified cached model weight: " + path.name, flush=True)
+        print(f"Verified cached {label.lower()} file: " + path.name, flush=True)
         return
     scratch = path.parent / ".dig-downloads"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -267,8 +267,8 @@ def download_parallel(routes, path, item, *, workers=4, chunk_size=8 * 1024 * 10
         pending = any(not piece_path(a, b).exists() or piece_path(a, b).stat().st_size != b-a+1
                       for a, b in ranges)
         if pending:
-            routes = rank_routes(routes, item, offset, scratch, stop)
-        print(f"Parallel model: {path.name}; saved prefix {offset / 1e6:.1f}/{size / 1e6:.1f} MB; "
+            routes = rank_routes(routes, item, offset, scratch, stop, label)
+        print(f"Parallel {label.lower()}: {path.name}; saved prefix {offset / 1e6:.1f}/{size / 1e6:.1f} MB; "
               f"connections={workers}; chunk={chunk_size / 1048576:.1f} MiB", flush=True)
         began, initial = time.monotonic(), offset
         pool = ThreadPoolExecutor(max_workers=workers)
@@ -285,7 +285,7 @@ def download_parallel(routes, path, item, *, workers=4, chunk_size=8 * 1024 * 10
                     extra = sum(max(0, stored_size(piece_path(a, b)) - max(0, offset-a))
                                 for a, b in batch)
                     inflight = sum(stored_size(piece_path(a, b).with_suffix(".transfer")) for a, b in batch)
-                    print(f"Model progress: {min(size, offset + extra) / 1e6:.1f}/{size / 1e6:.1f} MB; "
+                    print(f"{label} progress: {min(size, offset + extra) / 1e6:.1f}/{size / 1e6:.1f} MB; "
                           f"in-flight {inflight / 1e6:.1f} MB; "
                           f"session {(offset + extra + inflight - initial) / max(time.monotonic()-began, .001) / 1e6:.2f} MB/s",
                           flush=True)
@@ -304,11 +304,11 @@ def download_parallel(routes, path, item, *, workers=4, chunk_size=8 * 1024 * 10
             stop.set()
             pool.shutdown(wait=True, cancel_futures=True)
     if partial.stat().st_size != size or sha256(partial) != expected:
-        raise RuntimeError("Model size/SHA256 mismatch; partial retained: " + str(partial))
+        raise RuntimeError(f"{label} size/SHA256 mismatch; partial retained: " + str(partial))
     os.replace(partial, path)
     # Only the downloader's own empty chunk directory/manifest is removed.
     if chunks.exists():
         (chunks / "layout.json").unlink(missing_ok=True)
         if not any(chunks.iterdir()):
             chunks.rmdir()
-    print("Verified downloaded model weight: " + path.name, flush=True)
+    print(f"Verified downloaded {label.lower()} file: " + path.name, flush=True)

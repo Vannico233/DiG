@@ -106,6 +106,14 @@ CPU 页面执行（先同步 Git）：
 bash scripts/prepare_round2.sh
 ```
 
+Geo3K / ScienceQA 的 Parquet 下载使用固定版本、官方 SHA256 校验和 8 MiB 分块续传，
+默认 4 个连接，测速后选择官方（继承代理）、镜像直连或官方直连。
+中断后重跑同一命令；已准备的数据集校验后跳过，旧 Hub 缓存只读复用。
+分块连续 12 次没有进展才失败；有有效新增字节会继续恢复。
+可用 `DIG_DATA_SOURCE=hf-mirror bash scripts/prepare_round2.sh` 固定镜像；
+`DIG_DATA_CONNECTIONS=2` 可降低连接数。不要删除 `assets/round2` 或 `assets/hf-cache`。
+等待日志出现 `Round-two CPU assets ready` 后再启动 GPU。
+
 GPU 页面执行：
 
 ```bash

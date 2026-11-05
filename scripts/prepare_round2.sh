@@ -16,7 +16,7 @@ Path('.runtime/round2-extra-constraints.txt').write_text('sympy==' + version('sy
 PY
 python -m pip install -c requirements/h200-constraints.txt -c .runtime/round2-extra-constraints.txt 'math-verify[antlr4_13_2]==0.8.0'
 python -m pip check
-python scripts/round2.py prepare
+python -u scripts/round2.py prepare
 # Fail before reserving GPUs if an equivalent non-numeric answer cannot be scored.
 python - <<'PY'
 from dig_rl.round2_protocol import score_answer

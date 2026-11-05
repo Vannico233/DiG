@@ -111,6 +111,7 @@ def prepare(assets, model):
     from huggingface_hub import HfApi
     from datasets import load_dataset
     from .hf_downloads import resolve_revisions, hf_retry
+    from .dataset_downloads import load_pinned_parquet
     assets, model = Path(assets), Path(model)
     assets.mkdir(parents=True, exist_ok=True)
     requested = {k: (v[0], "main") for k, v in SOURCES.items()}
@@ -121,9 +122,14 @@ def prepare(assets, model):
             existing = verify(dest)
             if existing["revisions"] != lock["resolved"] or existing["model_id"] != sha256(model / "dig_model.json"):
                 raise ValueError("Prepared revisions/model differ; choose a new assets path")
+            print("Verified prepared dataset; skipping: " + dataset, flush=True)
             continue
         repo, subset = SOURCES[dataset]
-        ds = hf_retry("Loading " + dataset, lambda: load_dataset(repo, subset, revision=lock["resolved"][dataset]))
+        if dataset in ("geo3k", "scienceqa_image"):
+            revision = lock["resolved"][dataset]
+            ds = load_pinned_parquet(HfApi(), repo, revision, assets / ".sources" / dataset / revision)
+        else:
+            ds = hf_retry("Loading " + dataset, lambda: load_dataset(repo, subset, revision=lock["resolved"][dataset]))
         if dataset == "math":
             repo500, subset500 = SOURCES["math500"]
             test_raw = hf_retry("Loading MATH-500", lambda: load_dataset(repo500, subset500,
@@ -133,6 +139,7 @@ def prepare(assets, model):
         dest.mkdir(parents=True, exist_ok=True)
         train, test, excluded = [], [], []
         for name, rows, result in (("train", ds["train"], train), ("test", test_raw, test)):
+            print(f"Preparing {dataset}/{name}: {len(rows)} source rows", flush=True)
             for i, raw in enumerate(rows):
                 row = normalize(raw, "math500" if dataset == "math" and name == "test" else dataset, dest)
                 if row is None:
@@ -141,6 +148,8 @@ def prepare(assets, model):
                     excluded.append(dict(split=name, index=i, reason="missing_image_or_reference"))
                 else:
                     result.append(row)
+                if (i + 1) % 500 == 0 or i + 1 == len(rows):
+                    print(f"Prepared {dataset}/{name}: {i + 1}/{len(rows)}; kept {len(result)}", flush=True)
         splits = split(train, test)
         files = {}
         for name, rows in splits.items():
