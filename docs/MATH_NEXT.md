@@ -57,7 +57,10 @@ HF 连续批处理及 vLLM 需要另外验证 Qwen3.5 混合注意力、LoRA 和
 
 分别实测 legacy batch16、buffered batch16/32/64：相同 8 道 calibration 题，每题 8 条回答，
 使用完整 4096/8192 上限，然后执行最长 calibration 输入的完整反向检查。
-只在通过、峰值 reserved <60 GiB 的候选中按有效 tokens/s 选最快者；同数据集三个 arm 使用相同选项。
+分别记录生成/反向的 allocated 峰值及 reserved 缓存峰值。用实际张量占用检查余量：
+allocated 峰值低于 min(显存总量的 85%, 显存总量-8 GiB)，再按有效 tokens/s 选择；
+reserved 仅作诊断，不能当作正在使用的张量内存。同数据集三个 arm 使用相同选项。
+数学 worker 在各生成批次后释放未使用的分配器缓存，不删除模型状态或回答。
 记录 useful_decode_fraction = 实际回答 tokens / 固定批次分配的 decode slots，量化 EOS 后的空算。
 一次测速不是最坏输入显存保证；OOM 候选被拒绝，其他异常停止实验。
 
@@ -66,6 +69,44 @@ HF 连续批处理及 vLLM 需要另外验证 Qwen3.5 混合注意力、LoRA 和
 profile/eval 及四卡阶段成本单独记录，不能隐去后声称端到端加速。
 每次更新保存参数、优化器、预测器、采样及 PyTorch RNG；同版本可恢复。
 代码/依赖/数据/协议变化必须新建 run，旧实验保留。
+
+## 从 reserved 阈值误拒绝恢复
+
+`52f0f47` 使用了错误的硬条件 `peak_reserved_gib < 60`。已观察到 MATH 四个 profile
+均完成，但缓存预留峰值约 78 GiB，导致整个 pipeline 在训练前被拒绝。
+旧日志没有生成 allocated 峰值；反向的 12.78 GiB 不能代替生成峰值。
+[PyTorch 2.10 显存管理说明](https://docs.pytorch.org/docs/2.10/notes/cuda.html#memory-management)
+区分了张量实际占用、分配器管理的预留量，以及 empty_cache 只能释放未使用缓存。
+
+下面的迁移只接受尚未训练的原版本，检查代码、依赖、数据及模型身份，保留原目录。
+八项测速和原始阶段成本复制为 historical 记录，不再运行八项完整测速。
+GPU 每个数据集先做一个保守容量检查：legacy 采样模式，batch16；
+合成输入采用完整 max_input_tokens，并强制生成至 max_new_tokens，然后做完整长度反向。
+这个检查不评分、不更新参数，不算新的速度比较，也不改变实际训练的 EOS/采样设置。
+OOM 或 allocated 余量不足时依次尝试 batch8、batch4；其他异常直接报错。
+通过后开始训练，三个 arm 继续采用同一数据集的相同批量设置。
+
+CPU 同步封存后执行一次迁移：
+
+```bash
+python scripts/math_next.py migrate-profiles --resume-from runs/math_online_20261106 --output runs/math_online_20261106_memcheck
+```
+
+GPU 启动（整行）：
+
+```bash
+nohup bash scripts/start_math_next.sh runs/math_online_20261106_memcheck >> .runtime/math_online_memcheck.log 2>&1 < /dev/null &
+```
+
+查看 `capacity_generation` / `capacity_backward` / `training` 阶段和失败详情：
+
+```bash
+source scripts/activate_offline.sh
+python scripts/math_next.py status --output runs/math_online_20261106_memcheck
+tail -n 30 .runtime/math_online_memcheck.log
+```
+
+迁移只运行一次；同版本中断后重复 GPU 启动命令即可。后续 summarize/test 使用新目录。
 
 ## CPU 同步（不重新下载）
 

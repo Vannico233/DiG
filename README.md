@@ -162,3 +162,6 @@ Geo3K 使用答案代理，ScienceQA 有解答时使用解答代理，参考答�
 默认三个 arm 一致使用 B=8、G=8、16 步、AdamW 1e-6 和 256 题验证。
 这是机制验证配置，不能当成已证实的改进或顶会统一标准设置。
 CPU 同步封存、GPU 启动、监测及完整官方测试命令见 [数学实验流程](docs/MATH_NEXT.md)。
+若 `52f0f47` 报 `No safe full-length profile: math`，先查看 profile 的 passed 和 error。
+已修正把 reserved 缓存误当作 live 显存的筛选；上述流程提供 `migrate-profiles`，
+保留八项已有测速，仅补充 batch16/8/4 的最大长度容量检查后继续训练。

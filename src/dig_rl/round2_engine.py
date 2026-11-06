@@ -203,6 +203,11 @@ class BatchedEngine(Engine):
                 group["parsed"] += int(parsed)
                 # Allocated batch time for accounting, not an isolated per-question timing.
                 group["seconds"] += elapsed / len(chunk)
+            if getattr(self, "clear_generation_cache", False):
+                # Only unused allocator blocks are released. Live tensors and
+                # policy state are untouched; no generated response is discarded.
+                del outputs, batch, processor, sampler
+                torch.cuda.empty_cache()
         return groups
 
     def rollout(self, row, seed, count=None):

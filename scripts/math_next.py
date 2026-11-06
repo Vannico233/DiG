@@ -14,10 +14,15 @@ sys.path.insert(0, str(ROOT / "src"))
 from dig_rl.io import read_rows, sha256, write_json, append_json
 from dig_rl.round2_protocol import Protocol, object_hash
 from dig_rl.round2_train import records, evaluate
+from dig_rl.math_profile_recovery import memory_assessment, migrate_profiles
 from round2 import runtime_identity, read, now
 
 DATASETS = ("gsm8k", "math")
 ARMS = ("rloo", "zero", "online")
+
+
+class NoSafeProfile(RuntimeError):
+    pass
 
 
 def identity():
@@ -64,6 +69,8 @@ def validate(output):
 
 
 def task_specs(phase):
+    if phase == "verify":
+        return [dict(name=d+"_verify",dataset=d,phase=phase) for d in DATASETS]
     if phase == "profile":
         return [dict(name=f"{d}_{mode}_{size}", dataset=d, mode=mode, size=size, phase=phase)
                 for mode,size in (("legacy",16),("buffered",16),("buffered",32),("buffered",64)) for d in DATASETS]
@@ -74,22 +81,69 @@ def task_specs(phase):
 
 def choose_profiles(output):
     decision = {}
+    diagnostics = {}
     for dataset in DATASETS:
         rows = [read(output / "profile" / (t["name"]+".json")) for t in task_specs("profile") if t["dataset"]==dataset]
-        safe = [r for r in rows if r["passed"] and r["peak_reserved_gib"] < 60.]
+        diagnostics[dataset] = [dict(mode=r.get("mode"),active_sequences=r.get("active_sequences"),
+                                    **memory_assessment(r)) for r in rows]
+        safe = [r for r in rows if memory_assessment(r)["accepted"]]
         if not safe:
-            raise RuntimeError("No safe full-length profile: " + dataset)
+            write_json(output/"profile_selection.json",diagnostics)
+            raise NoSafeProfile("No accepted live-memory profile: " + dataset + "; details: profile_selection.json")
         best = max(safe, key=lambda r:r["tokens_per_second"])
         decision[dataset] = dict(mode=best["mode"], active_sequences=best["active_sequences"],
             tokens_per_second=best["tokens_per_second"], profile=best,
             note="One full-cap calibration-prefix sample. Not sustained-training performance or worst-case memory proof.")
+    write_json(output/"profile_selection.json",diagnostics)
     write_json(output / "profile_decision.json", decision)
+
+
+def verify_capacity(engine, data, output, dataset, progress):
+    """One conservative check per dataset; lower batch only on OOM/headroom failure."""
+    import torch
+    row = read_rows(data/"calibration.jsonl")[0]
+    history = output/("historical_profiles" if (output/"historical_profiles").exists() else "profile")
+    # Prefer the already measured original sampler. Do not select larger batches
+    # from historical reserved-only measurements or claim their timing is fresh.
+    mode = "legacy"
+    engine.buffered_sampling = False
+    for size in (16,8,4):
+        engine.protocol = replace(engine.protocol,active_sequences=size)
+        try:
+            report = engine.capacity_check(row,progress)
+        except Exception as error:
+            if not isinstance(error,torch.OutOfMemoryError) and "out of memory" not in str(error).lower():
+                raise
+            report = dict(passed=False,error=str(error))
+        report.update(mode=mode,active_sequences=size)
+        assessment = memory_assessment(report)
+        report["assessment"] = assessment
+        write_json(output/"capacity"/f"{dataset}_{size}.json",report)
+        if assessment["accepted"]:
+            previous = history/f"{dataset}_{mode}_{size}.json"
+            old = read(previous) if previous.exists() else {}
+            decision = dict(mode=mode,active_sequences=size,capacity=report,
+                historical_tokens_per_second=old.get("tokens_per_second"),
+                note="Conservative batch with new synthetic maximum-shape live-memory check; historical speed is not remeasured throughput.")
+            write_json(output/"capacity"/f"{dataset}_decision.json",decision)
+            return
+        progress("reducing_batch",rejected_size=size,reason=assessment["reason"])
+        engine.zero_grad()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    raise RuntimeError("Capacity checks failed at batch 16/8/4: "+dataset+"; see capacity/*.json")
+
+
+def select_verified_capacity(output):
+    decisions = {d:read(output/"capacity"/f"{d}_decision.json") for d in DATASETS}
+    if not all(memory_assessment(r["capacity"])["accepted"] for r in decisions.values()):
+        raise RuntimeError("Capacity verification missing/invalid")
+    write_json(output/"profile_decision.json",decisions)
 
 
 def worker(output, task):
     import torch
     from dig_rl.math_engine import MathEngine
-    from dig_rl.round2_engine import BatchedEngine
     from dig_rl.math_train import train_math
     m = validate(output)
     dataset, phase, name = task["dataset"], task["phase"], task["name"]
@@ -104,14 +158,19 @@ def worker(output, task):
     try:
         if phase == "profile":
             cfg = replace(cfg, active_sequences=task["size"])
-            engine_class = BatchedEngine if task["mode"]=="legacy" else MathEngine
+            mode = task["mode"]
+        elif phase == "verify":
+            mode = "legacy"
         else:
             decision = read(output / "profile_decision.json")[dataset]
             cfg = replace(cfg, active_sequences=decision["active_sequences"])
-            engine_class = BatchedEngine if decision["mode"]=="legacy" else MathEngine
-        engine = engine_class(m["model"], cfg, data)
+            mode = decision["mode"]
+        engine = MathEngine(m["model"], cfg, data)
+        engine.buffered_sampling = mode=="buffered"
         binding = dict(manifest=object_hash(m), execution=asdict(cfg))
-        if phase == "profile":
+        if phase == "verify":
+            verify_capacity(engine,data,output,dataset,progress)
+        elif phase == "profile":
             rows = read_rows(data / "calibration.jsonl")[:8]
             progress("warming")
             engine.rollout_many([(rows[0], cfg.seed)], count=2, max_tokens=32)
@@ -121,6 +180,8 @@ def worker(output, task):
             groups = engine.rollout_many([(r, cfg.seed+10007*i) for i,r in enumerate(rows)])
             engine.sync(); elapsed = time.monotonic()-start
             generation_peak = torch.cuda.max_memory_reserved()/2**30
+            generation_live = torch.cuda.max_memory_allocated()/2**30
+            total_memory = torch.cuda.get_device_properties(engine.device).total_memory/2**30
             tokens = sum(r["generated_tokens"] for r in groups)
             slots = sum(r["decode_slots"] for r in groups)
             progress("full_length_backward")
@@ -128,6 +189,8 @@ def worker(output, task):
             write_json(output / "profile" / (name+".json"), dict(passed=True, mode=task["mode"],
                 active_sequences=cfg.active_sequences, tokens=tokens, seconds=elapsed,
                 tokens_per_second=tokens/elapsed, useful_decode_fraction=tokens/slots,
+                device_total_gib=total_memory,generation_peak_allocated_gib=generation_live,
+                generation_peak_reserved_gib=generation_peak,
                 peak_reserved_gib=max(generation_peak,memory["peak_reserved_gib"]), memory=memory,
                 max_new_tokens=cfg.max_new_tokens, responses=sum(r["responses"] for r in groups)))
         else:
@@ -265,15 +328,16 @@ def summarize(output, official=False):
 def main():
     os.chdir(ROOT)
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("command", choices=("plan","pipeline","profile","test","status","summarize","worker"))
+    p.add_argument("command", choices=("plan","migrate-profiles","pipeline","profile","test","status","summarize","worker"))
     p.add_argument("--output", type=Path, default=Path("runs/math_online_20261106"))
     p.add_argument("--assets", type=Path, default=Path("assets/round2"))
     p.add_argument("--model", type=Path, default=Path("assets/model"))
+    p.add_argument("--resume-from", type=Path)
     p.add_argument("--gpus", nargs=4, default=["0","1","2","3"])
     p.add_argument("--steps", type=int, default=16)
     p.add_argument("--candidates", type=int, default=8)
     p.add_argument("--train-seconds", type=float, default=14400.)
-    p.add_argument("--phase", choices=("profile","train","test"))
+    p.add_argument("--phase", choices=("profile","verify","train","test"))
     p.add_argument("--task")
     args = p.parse_args()
     args.output = args.output.resolve()
@@ -281,6 +345,10 @@ def main():
         p.error("Output must be a child of repository runs")
     if args.command == "plan":
         plan(args); return
+    if args.command == "migrate-profiles":
+        if args.resume_from is None:
+            p.error("migrate-profiles requires --resume-from")
+        migrate_profiles(args.resume_from,args.output,identity()); return
     if args.command == "status":
         print(json.dumps(read(args.output / "status.json"), indent=2) if (args.output/"status.json").exists() else "Not launched")
         for path in sorted(args.output.glob("progress_*.json")):
@@ -307,8 +375,16 @@ def main():
         write_json(args.output/"status.json", dict(state="running", command=args.command, utc=now(), pid=os.getpid()))
         try:
             if args.command in ("pipeline","profile"):
-                launch(args.output, "profile", m)
-                choose_profiles(args.output)
+                if m.get("profile_recovery"):
+                    launch(args.output,"verify",m)
+                    select_verified_capacity(args.output)
+                else:
+                    launch(args.output, "profile", m)
+                    try:
+                        choose_profiles(args.output)
+                    except NoSafeProfile:
+                        launch(args.output,"verify",m)
+                        select_verified_capacity(args.output)
             if args.command == "pipeline":
                 launch(args.output, "train", m)
                 summarize(args.output)
