@@ -84,6 +84,9 @@ def visual_completion_logprobs(model, sequence, prompt_length, media):
 
 
 class BatchedEngine(Engine):
+    def sampling_processor(self, seeds, cap):
+        return IndependentSampler(seeds)
+
     def __init__(self, model_dir, protocol, data_root):
         cfg = Config(horizon=protocol.max_new_tokens, max_prompt_tokens=protocol.max_input_tokens,
             group_size=protocol.group_size, rollout_batch_size=protocol.group_size,
@@ -164,7 +167,7 @@ class BatchedEngine(Engine):
         if count < 1:
             raise ValueError("Positive response count required")
         groups = [dict(sequences=[], rewards=[], texts=[], generated_tokens=0, truncated=0, parsed=0,
-                       seconds=0., responses=count) for _ in requests]
+                       seconds=0., responses=count, decode_slots=0, generation_batches=0.) for _ in requests]
         flat = [(i, row, (int(seed) + sample * 1000003) % (2**63 - 1))
                 for i, (row, seed) in enumerate(requests) for sample in range(count)]
         self.model.eval()
@@ -177,11 +180,14 @@ class BatchedEngine(Engine):
             items = [self.encoded(row) for _, row, _ in chunk]
             batch = {k: v.to(self.device) for k, v in pack_inputs(items, self.tokenizer.pad_token_id).items()}
             width = batch["input_ids"].shape[1]
-            processor = LogitsProcessorList([] if greedy else [IndependentSampler([x[2] for x in chunk])])
+            sampler = None if greedy else self.sampling_processor([x[2] for x in chunk], cap)
+            processor = LogitsProcessorList([] if greedy else [sampler])
             self.sync(); started = time.monotonic()
             with torch.no_grad():
                 outputs = self.model.generate(**batch, generation_config=config, logits_processor=processor)
             self.sync(); elapsed = time.monotonic() - started
+            if sampler is not None and hasattr(sampler, "validate"):
+                sampler.validate()
             for (index, row, _), item, output in zip(chunk, items, outputs.cpu()):
                 completion, truncated = trim_completion(output[width:], self.eos_ids)
                 text = self.tokenizer.decode(completion, skip_special_tokens=True)
@@ -191,6 +197,8 @@ class BatchedEngine(Engine):
                 group["texts"].append(text)
                 group["rewards"].append(value)
                 group["generated_tokens"] += len(completion)
+                group["decode_slots"] += outputs.shape[1] - width
+                group["generation_batches"] += 1. / len(chunk)
                 group["truncated"] += int(truncated)
                 group["parsed"] += int(parsed)
                 # Allocated batch time for accounting, not an isolated per-question timing.
